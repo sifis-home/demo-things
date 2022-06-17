@@ -19,13 +19,15 @@ use axum::{
     Extension, Router,
 };
 use wot_td::{
-    builder::data_schema::{
-        BuildableDataSchema, DataSchemaBuilder, IntegerDataSchemaBuilderLike,
-        ObjectDataSchemaBuilderLike, SpecializableDataSchema,
+    builder::{
+        affordance::BuildableInteractionAffordance,
+        data_schema::{
+            BuildableDataSchema, IntegerDataSchemaBuilderLike, ObjectDataSchemaBuilderLike,
+            SpecializableDataSchema,
+        },
+        human_readable_info::BuildableHumanReadableInfo,
     },
-    thing::{
-        ActionAffordance, EventAffordance, Form, InteractionAffordance, PropertyAffordance, Thing,
-    },
+    thing::Thing,
 };
 
 struct Lamp {
@@ -46,151 +48,44 @@ async fn main() {
         .attype("Light")
         .description("A web connected lamp")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
+        .property("on", |b| {
+            b.attype("OnOffProperty")
+                .title("On/Off")
+                .description("Whether the lamp is turned on")
+                .form(|b| b.href("/properties/on"))
+                .bool()
+        })
+        .property("brightness", |b| {
+            b.attype("BrightnessProperty")
+                .title("Brightness")
+                .description("The level of light from 0-100")
+                .form(|b| b.href("/properties/brightness"))
+                .integer()
+                .minimum(0)
+                .maximum(100)
+                .unit("percent")
+        })
+        .action("fade", |b| {
+            b.title("Fade")
+                .description("Fade the lamp to a given level")
+                .form(|b| b.href("/actions/fade"))
+                .input(|b| {
+                    b.object()
+                        .property("brightness", true, |b| {
+                            b.integer().minimum(0).maximum(100).unit("percent")
+                        })
+                        .property("duration", true, |b| {
+                            b.integer().minimum(1).unit("milliseconds")
+                        })
+                })
+        })
+        .event("overheated", |b| {
+            b.description("The lamp has exceeded its safe operating temperature")
+                .form(|b| b.href("/events/overheated"))
+                .data(|b| b.number().unit("degree celsius"))
+        })
         .build()
         .expect("cannot build Thing Descriptor for the lamp");
-
-    let thing = Thing {
-        properties: Some(
-            [
-                (
-                    "on".to_string(),
-                    PropertyAffordance {
-                        interaction: InteractionAffordance {
-                            attype: Some(vec!["OnOffProperty".to_string()]),
-                            title: Some("On/Off".to_string()),
-                            titles: None,
-                            description: Some("Whether the lamp is turned on".to_string()),
-                            descriptions: None,
-                            forms: vec![Form {
-                                op: Default::default(),
-                                href: "/properties/on".to_string(),
-                                content_type: Default::default(),
-                                content_coding: Default::default(),
-                                subprotocol: Default::default(),
-                                security: Default::default(),
-                                scopes: Default::default(),
-                                response: Default::default(),
-                            }],
-                            uri_variables: None,
-                        },
-                        data_schema: DataSchemaBuilder::default().bool().into(),
-                        observable: None,
-                    },
-                ),
-                (
-                    "brightness".to_string(),
-                    PropertyAffordance {
-                        interaction: InteractionAffordance {
-                            attype: Some(vec!["BrightnessProperty".to_string()]),
-                            title: Some("Brightness".to_string()),
-                            titles: None,
-                            description: Some("The level of light from 0-100".to_string()),
-                            descriptions: None,
-                            forms: vec![Form {
-                                op: Default::default(),
-                                href: "/properties/brightness".to_string(),
-                                content_type: Default::default(),
-                                content_coding: Default::default(),
-                                subprotocol: Default::default(),
-                                security: Default::default(),
-                                scopes: Default::default(),
-                                response: Default::default(),
-                            }],
-                            uri_variables: None,
-                        },
-                        data_schema: DataSchemaBuilder::default()
-                            .integer()
-                            .minimum(0)
-                            .maximum(100)
-                            .unit("percent")
-                            .into(),
-                        observable: None,
-                    },
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        ),
-        actions: Some(
-            [(
-                "fade".to_string(),
-                ActionAffordance {
-                    interaction: InteractionAffordance {
-                        attype: None,
-                        title: Some("Fade".to_string()),
-                        titles: None,
-                        description: Some("Fade the lamp to a given level".to_string()),
-                        descriptions: None,
-                        forms: vec![Form {
-                            op: Default::default(),
-                            href: "/actions/fade".to_string(),
-                            content_type: Default::default(),
-                            content_coding: Default::default(),
-                            subprotocol: Default::default(),
-                            security: Default::default(),
-                            scopes: Default::default(),
-                            response: Default::default(),
-                        }],
-                        uri_variables: None,
-                    },
-                    input: Some(
-                        DataSchemaBuilder::default()
-                            .object()
-                            .property("brightness", true, |b| {
-                                b.integer().minimum(0).maximum(100).unit("percent")
-                            })
-                            .property("duration", true, |b| {
-                                b.integer().minimum(1).unit("milliseconds")
-                            })
-                            .into(),
-                    ),
-                    output: None,
-                    safe: false,
-                    idempotent: false,
-                },
-            )]
-            .into_iter()
-            .collect(),
-        ),
-        events: Some(
-            [(
-                "overheated".to_string(),
-                EventAffordance {
-                    interaction: InteractionAffordance {
-                        attype: None,
-                        title: None,
-                        titles: None,
-                        description: Some(
-                            "The lamp has exceeded its safe operating temperature".to_string(),
-                        ),
-                        descriptions: None,
-                        forms: vec![Form {
-                            op: Default::default(),
-                            href: "/events/overheated".to_string(),
-                            content_type: Default::default(),
-                            content_coding: Default::default(),
-                            subprotocol: Default::default(),
-                            security: Default::default(),
-                            scopes: Default::default(),
-                            response: Default::default(),
-                        }],
-                        uri_variables: None,
-                    },
-                    subscription: None,
-                    data: Some(
-                        DataSchemaBuilder::default()
-                            .number()
-                            .unit("degree celsius")
-                            .into(),
-                    ),
-                    cancellation: None,
-                },
-            )]
-            .into_iter()
-            .collect(),
-        ),
-        ..thing
-    };
 
     let lamp = Lamp {
         is_on: true,
