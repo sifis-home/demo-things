@@ -1,8 +1,10 @@
 use bytes::Bytes;
+use http_api_problem::HttpApiProblem;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use serde_with::skip_serializing_none;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use time::OffsetDateTime;
 use tokio::{
     join,
@@ -107,8 +109,7 @@ async fn main() {
         .route("/properties/:property", get(get_property))
         .route("/properties/:property", put(put_property))
         .route("/actions", get(get_actions))
-        .route("/actions", post(post_actions))
-        .route("/actions/:action", get(get_action))
+        .route("/actions/:action/:id", get(get_action))
         .route("/actions/:action", post(post_action))
         .route("/actions/:action/:id", delete(delete_action))
         .route("/events", get(get_events))
@@ -317,21 +318,22 @@ async fn handle_messages(
                     .saturating_sub((now - time_requested).try_into().unwrap_or(Duration::ZERO));
                 let id = Uuid::new_v4();
                 let href = format!("/actions/fade/{}", id);
-                let fade_action = StoredFadeAction {
-                    input: FadeActionInput {
+                let fade_action = ActionStatus {
+                    output: Some(FadeActionInput {
                         brightness,
                         duration: duration.as_millis().try_into().unwrap_or(u64::MAX),
-                    },
-                    href,
-                    time_requested,
-                    time_completed: None,
-                    status: ActionStatus::Pending,
+                    }),
+                    href: Some(href),
+                    time_requested: Some(time_requested),
+                    error: None,
+                    time_ended: None,
+                    status: ActionStatusStatus::Pending,
                 };
 
                 Arc::make_mut(&mut actions).push(StoredAction {
                     id,
-                    ty: StoredActionType::Fade(StoredFadeAction {
-                        status: ActionStatus::Created,
+                    ty: StoredActionType::Fade(ActionStatus {
+                        status: ActionStatusStatus::Created,
                         ..fade_action.clone()
                     }),
                 });
@@ -366,9 +368,11 @@ async fn handle_messages(
                 match &mut action.ty {
                     StoredActionType::Fade(action) => {
                         let now = OffsetDateTime::now_utc();
-                        brightness = action.input.brightness;
-                        action.time_completed = Some(now);
-                        action.status = ActionStatus::Completed;
+                        if let Some(output) = action.output {
+                            brightness = output.brightness;
+                        }
+                        action.time_ended = Some(now);
+                        action.status = ActionStatusStatus::Completed;
                     }
                 }
             }
@@ -452,24 +456,22 @@ async fn put_property(
     Path(property): Path<PropertyName>,
     Json(value): Json<Value>,
     Extension(state): Extension<AppState>,
-) -> Result<Json<Value>, AppError> {
-    let property: Value = match (property, value) {
+) -> Result<impl IntoResponse, AppError> {
+    match (property, value) {
         (PropertyName::Brightness, Value::Number(value)) => {
             let value = value
                 .as_u64()
                 .and_then(|value| value.try_into().ok())
                 .ok_or(AppError::InvalidValue)?;
             state.set_brightness(value).await;
-            value.into()
         }
         (PropertyName::On, Value::Bool(value)) => {
             state.set_is_on(value).await;
-            value.into()
         }
         _ => return Err(AppError::InvalidValue),
-    };
+    }
 
-    Ok(Json(property))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_events(Extension(state): Extension<AppState>) -> impl IntoResponse {
@@ -481,23 +483,17 @@ async fn get_events(Extension(state): Extension<AppState>) -> impl IntoResponse 
 }
 
 async fn get_actions(Extension(state): Extension<AppState>) -> impl IntoResponse {
-    let bytes: Bytes = serde_json::to_vec(&*state.get_actions().await)
-        .expect("unable to convert Thing actions to JSON")
-        .into();
+    let mut actions = HashMap::<_, Vec<_>>::new();
+    for action in &*state.get_actions().await {
+        use StoredActionType::*;
+        let name = &match action.ty {
+            Fade(_) => "fade",
+        };
 
-    ([(header::CONTENT_TYPE, "application/json")], bytes)
-}
+        actions.entry(name).or_default().push(action.clone());
+    }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-enum Action {
-    Fade(FadeAction),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FadeAction {
-    input: FadeActionInput,
+    Json(actions)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -526,65 +522,38 @@ impl StoredAction {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-enum ActionStatus {
+enum ActionStatusStatus {
     Created,
     Pending,
     Completed,
+    Failed,
 }
 
-impl Default for ActionStatus {
+impl Default for ActionStatusStatus {
     fn default() -> Self {
         Self::Created
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", untagged)]
 enum StoredActionType {
-    Fade(StoredFadeAction),
+    Fade(ActionStatus<FadeActionInput>),
 }
 
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct StoredFadeAction {
-    input: FadeActionInput,
-    href: String,
-    #[serde(with = "time::serde::rfc3339")]
-    time_requested: OffsetDateTime,
-    #[serde(
-        with = "time::serde::rfc3339::option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    time_completed: Option<OffsetDateTime>,
+struct ActionStatus<Output> {
     #[serde(default)]
-    status: ActionStatus,
-}
-
-async fn post_actions(
-    Json(value): Json<Value>,
-    Extension(state): Extension<AppState>,
-) -> Result<impl IntoResponse, AppError> {
-    let action: Action = serde_json::from_value(value).map_err(|_| AppError::InvalidValue)?;
-    match action {
-        Action::Fade(fade) => {
-            let action = state.fade(fade.input).await;
-            let (input, href) = match action.ty {
-                StoredActionType::Fade(StoredFadeAction { input, href, .. }) => (input, href),
-            };
-
-            let response = (
-                StatusCode::CREATED,
-                Json(json!({
-                    "fade": {
-                        "input": input,
-                        "href": href,
-                        "status": ActionStatus::Created,
-                    }
-                })),
-            );
-            Ok(response)
-        }
-    }
+    status: ActionStatusStatus,
+    output: Option<Output>,
+    error: Option<HttpApiProblem>,
+    href: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    time_requested: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    time_ended: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -594,22 +563,22 @@ enum ActionName {
 }
 
 async fn get_action(
-    Path(name): Path<ActionName>,
+    Path((name, id)): Path<(ActionName, Uuid)>,
     Extension(state): Extension<AppState>,
-) -> Json<Vec<StoredAction>> {
+) -> impl IntoResponse {
     let filter = match name {
         ActionName::Fade => StoredAction::to_fade,
     };
 
-    Json(
-        state
-            .get_actions()
-            .await
-            .iter()
-            .filter_map(filter)
-            .cloned()
-            .collect(),
-    )
+    let actions = state.get_actions().await;
+    match actions
+        .iter()
+        .filter_map(filter)
+        .find(|action| action.id == id)
+    {
+        Some(action) => (StatusCode::OK, Json(Some(action.clone()))),
+        None => (StatusCode::NOT_FOUND, Json(None)),
+    }
 }
 
 async fn delete_action(
@@ -652,24 +621,26 @@ async fn post_action(
     Json(value): Json<Value>,
     Extension(state): Extension<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    let action: Action = serde_json::from_value(value).map_err(|_| AppError::InvalidValue)?;
-    match (action_name, action) {
-        (ActionName::Fade, Action::Fade(fade)) => {
-            let action = state.fade(fade.input).await;
-            let (input, href) = match action.ty {
-                StoredActionType::Fade(StoredFadeAction { input, href, .. }) => (input, href),
+    match action_name {
+        ActionName::Fade => {
+            let fade: FadeActionInput =
+                serde_json::from_value(value).map_err(|_| AppError::InvalidValue)?;
+
+            let action = state.fade(fade).await;
+            let (output, href) = match action.ty {
+                StoredActionType::Fade(ActionStatus { output, href, .. }) => (output, href),
             };
 
-            let response = (
-                StatusCode::CREATED,
-                Json(json!({
-                    "fade": {
-                        "input": input,
-                        "href": href,
-                        "status": ActionStatus::Created,
-                    }
-                })),
-            );
+            let response = ActionStatus {
+                status: ActionStatusStatus::Created,
+                output: Some(output),
+                error: None,
+                href,
+                time_requested: None,
+                time_ended: None,
+            };
+
+            let response = (StatusCode::CREATED, Json(response));
             Ok(response)
         }
     }
