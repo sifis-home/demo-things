@@ -365,16 +365,13 @@ async fn handle_messages(
                     }
                 };
 
-                match &mut action.ty {
-                    StoredActionType::Fade(action) => {
-                        let now = OffsetDateTime::now_utc();
-                        if let Some(output) = action.output {
-                            brightness = output.brightness;
-                        }
-                        action.time_ended = Some(now);
-                        action.status = ActionStatusStatus::Completed;
-                    }
+                let action = action.ty.to_fade_mut().unwrap();
+                let now = OffsetDateTime::now_utc();
+                if let Some(output) = action.output {
+                    brightness = output.brightness;
                 }
+                action.time_ended = Some(now);
+                action.status = ActionStatusStatus::Completed;
             }
             GetEvents(sender) => sender.send(Arc::clone(&events)).unwrap(),
         }
@@ -485,12 +482,10 @@ async fn get_events(Extension(state): Extension<AppState>) -> impl IntoResponse 
 async fn get_actions(Extension(state): Extension<AppState>) -> impl IntoResponse {
     let mut actions = HashMap::<_, Vec<_>>::new();
     for action in &*state.get_actions().await {
-        use StoredActionType::*;
-        let name = &match action.ty {
-            Fade(_) => "fade",
-        };
-
-        actions.entry(name).or_default().push(action.clone());
+        actions
+            .entry(action.ty.name())
+            .or_default()
+            .push(action.clone());
     }
 
     Json(actions)
@@ -541,6 +536,26 @@ enum StoredActionType {
     Fade(ActionStatus<FadeActionInput>),
 }
 
+impl StoredActionType {
+    fn to_fade_mut(&mut self) -> Option<&mut ActionStatus<FadeActionInput>> {
+        match self {
+            Self::Fade(fade) => Some(fade),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Fade(_) => "fade",
+        }
+    }
+
+    fn into_output_href(self) -> Option<(Option<FadeActionInput>, Option<String>)> {
+        match self {
+            Self::Fade(ActionStatus { output, href, .. }) => Some((output, href)),
+        }
+    }
+}
+
 #[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -556,10 +571,18 @@ struct ActionStatus<Output> {
     time_ended: Option<OffsetDateTime>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum ActionName {
     Fade,
+}
+
+impl ActionName {
+    fn is_fade(&self) -> bool {
+        match self {
+            Self::Fade => true,
+        }
+    }
 }
 
 async fn get_action(
@@ -621,27 +644,22 @@ async fn post_action(
     Json(value): Json<Value>,
     Extension(state): Extension<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    match action_name {
-        ActionName::Fade => {
-            let fade: FadeActionInput =
-                serde_json::from_value(value).map_err(|_| AppError::InvalidValue)?;
+    assert!(action_name.is_fade());
+    let fade: FadeActionInput =
+        serde_json::from_value(value).map_err(|_| AppError::InvalidValue)?;
 
-            let action = state.fade(fade).await;
-            let (output, href) = match action.ty {
-                StoredActionType::Fade(ActionStatus { output, href, .. }) => (output, href),
-            };
+    let action = state.fade(fade).await;
+    let (output, href) = action.ty.into_output_href().unwrap();
 
-            let response = ActionStatus {
-                status: ActionStatusStatus::Created,
-                output: Some(output),
-                error: None,
-                href,
-                time_requested: None,
-                time_ended: None,
-            };
+    let response = ActionStatus {
+        status: ActionStatusStatus::Created,
+        output: Some(output),
+        error: None,
+        href,
+        time_requested: None,
+        time_ended: None,
+    };
 
-            let response = (StatusCode::CREATED, Json(response));
-            Ok(response)
-        }
-    }
+    let response = (StatusCode::CREATED, Json(response));
+    Ok(response)
 }
