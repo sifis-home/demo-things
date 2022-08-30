@@ -58,7 +58,7 @@ function obtain-metrics () {
     cargo clean
 
     # Get complexity snippets (only cyclomatic for now)
-    complex-code-spotter ./src $COMPARE_PATH/$SNIPPETS -O json
+    complex-code-spotter -O json src/ $COMPARE_PATH/$SNIPPETS
 
     # Create static analysis directory
     mkdir -p $COMPARE_PATH/$METRICS
@@ -75,11 +75,17 @@ function time-filesize-difference () {
     # Second compare path
     SECOND_COMPARE=$COMPARE_DIR/$SECOND_COMMIT
 
-    # Difference among build times (ignore returning value)
-    diff $FIRST_COMPARE/$TIME $SECOND_COMPARE/$TIME > $COMPARE_DIR/time_diff.txt || :
+    echo -e '| hash | size | time |' >> report.md
+    echo -e '|  -|  -|  -|' >> report.md
 
-    # Difference among filesizes (ignore returining value)
-    diff $FIRST_COMPARE/$FILESIZE $SECOND_COMPARE/$FILESIZE > $COMPARE_DIR/filesize_diff.txt || :
+    t=$FIRST_COMPARE/$TIME
+    h=$FIRST_COMMIT
+    s=`cut -f 1 $FIRST_COMPARE/$FILESIZE`
+    echo -e "| ${h} | ${s} | ${t} |" >> report.md
+    t=$SECOND_COMPARE/$TIME
+    h=$SECOND_COMMIT
+    s=`cut -f 1 $FIRST_COMPARE/$FILESIZE`
+    echo -e "| ${h} | ${s} | ${t} |" >> report.md
 }
 
 # Compute differences among json files
@@ -128,7 +134,7 @@ function json-differences () {
     for JSON_FILE in $INTERSECT
     do
         OUTPUT_FILE=`echo $JSON_FILE | tr '/' '_'`
-        diff <(jq -S . $FIRST_COMPARE/$1/$JSON_FILE ) <(jq -S . $SECOND_COMPARE/$1/$JSON_FILE ) > $COMPARE_DIFF/$OUTPUT_FILE || :
+        diff -urN <(jq -S . $FIRST_COMPARE/$1/$JSON_FILE ) <(jq -S . $SECOND_COMPARE/$1/$JSON_FILE ) > $COMPARE_DIFF/$OUTPUT_FILE || :
         # When a file is empty, remove it
         [ ! -s $COMPARE_DIFF/$OUTPUT_FILE ] && rm -f $COMPARE_DIFF/$OUTPUT_FILE
     done
