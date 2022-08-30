@@ -45,20 +45,23 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let thing = Thing::build("My Lamp")
+        .finish_extend()
         .id("urn:dev:ops:my-lamp-1234")
         .attype("OnOffSwitch")
         .attype("Light")
         .description("A web connected lamp")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .property("on", |b| {
-            b.attype("OnOffProperty")
+            b.finish_extend_data_schema()
+                .attype("OnOffProperty")
                 .title("On/Off")
                 .description("Whether the lamp is turned on")
                 .form(|b| b.href("/properties/on"))
                 .bool()
         })
         .property("brightness", |b| {
-            b.attype("BrightnessProperty")
+            b.finish_extend_data_schema()
+                .attype("BrightnessProperty")
                 .title("Brightness")
                 .description("The level of light from 0-100")
                 .form(|b| b.href("/properties/brightness"))
@@ -72,19 +75,24 @@ async fn main() {
                 .description("Fade the lamp to a given level")
                 .form(|b| b.href("/actions/fade"))
                 .input(|b| {
-                    b.object()
+                    b.finish_extend()
+                        .object()
                         .property("brightness", true, |b| {
-                            b.integer().minimum(0).maximum(100).unit("percent")
+                            b.finish_extend()
+                                .integer()
+                                .minimum(0)
+                                .maximum(100)
+                                .unit("percent")
                         })
                         .property("duration", true, |b| {
-                            b.integer().minimum(1).unit("milliseconds")
+                            b.finish_extend().integer().minimum(1).unit("milliseconds")
                         })
                 })
         })
         .event("overheated", |b| {
             b.description("The lamp has exceeded its safe operating temperature")
                 .form(|b| b.href("/events/overheated"))
-                .data(|b| b.number().unit("degree celsius"))
+                .data(|b| b.finish_extend().number().unit("degree celsius"))
         })
         .build()
         .expect("cannot build Thing Descriptor for the lamp");
