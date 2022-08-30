@@ -32,11 +32,6 @@ METRICS="metrics"
 # Comparison directory name
 COMPARE_DIR="Compare"
 
-# First commit sha
-FIRST_COMMIT="ccd8fff"
-# Second commit sha
-SECOND_COMMIT="master"
-
 # Obtains metrics
 function obtain-metrics () {
     # Compare directory path
@@ -58,7 +53,7 @@ function obtain-metrics () {
     cargo clean
 
     # Get complexity snippets (only cyclomatic for now)
-    complex-code-spotter ./src $COMPARE_PATH/$SNIPPETS -O json
+    complex-code-spotter -O json src/ $COMPARE_PATH/$SNIPPETS
 
     # Create static analysis directory
     mkdir -p $COMPARE_PATH/$METRICS
@@ -67,85 +62,37 @@ function obtain-metrics () {
     rust-code-analysis-cli --metrics -O json --pr -o "$COMPARE_PATH/$METRICS" -p src/
 }
 
-# Compute time and filesize differences
-function time-filesize-difference () {
-    # First compare path
-    FIRST_COMPARE=$COMPARE_DIR/$FIRST_COMMIT
-
-    # Second compare path
-    SECOND_COMPARE=$COMPARE_DIR/$SECOND_COMMIT
-
-    # Difference among build times (ignore returning value)
-    diff $FIRST_COMPARE/$TIME $SECOND_COMPARE/$TIME > $COMPARE_DIR/time_diff.txt || :
-
-    # Difference among filesizes (ignore returining value)
-    diff $FIRST_COMPARE/$FILESIZE $SECOND_COMPARE/$FILESIZE > $COMPARE_DIR/filesize_diff.txt || :
+function write-header () {
+echo -e '| hash | size | time | sloc | halstead (difficulty) | cyclomatic | cognitive |' >> report.md
+    echo -e '|  -|  -|  -|  -|  -|  -|  -|' >> report.md
 }
 
-# Compute differences among json files
-function json-differences () {
-    # Define path to the directory containing json differences
-    COMPARE_DIFF=$COMPARE_DIR/$2
+# Compute time and filesize differences
+function write-report () {
+    COMPARE=$COMPARE_DIR/$1
 
-    # First compare path
-    FIRST_COMPARE=$COMPARE_DIR/$FIRST_COMMIT
+    t=`sed -e "s:[[:space:]]*\([^ ]*\).*:\1:" $COMPARE/$TIME`
+    h=`git describe --all $1`
+    s=`cut -f 1 $COMPARE/$FILESIZE`
+    metrics=$COMPARE/metrics/src_bin_${DEMO}.rs.json
 
-    # Second compare path
-    SECOND_COMPARE=$COMPARE_DIR/$SECOND_COMMIT
+    sl=`jq '.metrics | .loc.sloc' $metrics`
+    hd=`jq '.metrics | .halstead.difficulty  * 100 | round / 100' $metrics`
+    cy=`jq '.metrics | .cyclomatic.average   * 100 | round / 100' $metrics`
+    co=`jq '.metrics | .cognitive.average    * 100 | round / 100' $metrics`
 
-    # Exit whether the first json directory does not exist
-    if [ ! -d "$FIRST_COMPARE/$1" ]
-    then
-      echo "$FIRST_COMPARE/$1 does not exist"
-      return 0
-    fi
-
-    # Exit whether the second json directory does not exist
-    if [ ! -d "$SECOND_COMPARE/$1" ]
-    then
-      echo "$SECOND_COMPARE/$1 does not exist"
-      return 0
-    fi
-
-    # All json paths from the two directories to compare
-    # Remove common path prefixes and sort out the outcomes
-    FIRST_JSON_FILES=`find $FIRST_COMPARE/$1 -type f -name "*.json" | cut -d'/' -f4- | LC_ALL=C sort`
-    SECOND_JSON_FILES=`find $SECOND_COMPARE/$1 -type f -name "*.json" | cut -d'/' -f4- | LC_ALL=C sort`
-
-    # Get intersection among the two arrays
-    INTERSECT=`comm -12 <(printf '%s\n' "${FIRST_JSON_FILES[@]}") <(printf '%s\n' "${SECOND_JSON_FILES[@]}")`
-
-    # Exit when the intersect array is empty
-    if [ -z "$INTERSECT" ]
-    then
-        return 0
-    fi
-
-    # Create json differences directory
-    mkdir -p $COMPARE_DIFF
-
-    # Iter over the intersection array and make comparisons through `jq`
-    for JSON_FILE in $INTERSECT
-    do
-        OUTPUT_FILE=`echo $JSON_FILE | tr '/' '_'`
-        diff <(jq -S . $FIRST_COMPARE/$1/$JSON_FILE ) <(jq -S . $SECOND_COMPARE/$1/$JSON_FILE ) > $COMPARE_DIFF/$OUTPUT_FILE || :
-        # When a file is empty, remove it
-        [ ! -s $COMPARE_DIFF/$OUTPUT_FILE ] && rm -f $COMPARE_DIFF/$OUTPUT_FILE
-    done
+    echo -e "| ${h} | ${s} | ${t} | ${sl} | ${hd} | ${cy} | ${co} |" >> report.md
 }
 
+COMMITS="webthings wot-td"
+# Obtain metrics
+#for commit in $COMMITS; do
+#    obtain-metrics $commit
+#done
 
-# Obtain metrics for the first commit
-obtain-metrics $FIRST_COMMIT
+# make a report with the binary size, build time, complexity
 
-# Obtain metrics for the second commit
-obtain-metrics $SECOND_COMMIT
-
-# Compute time and filesize differences
-time-filesize-difference
-
-# Compute snippets json differences
-json-differences $SNIPPETS "compare-diff"
-
-# Compute rust-code-analysis json differences
-json-differences $METRICS "rca-diff"
+write-header
+for commit in $COMMITS; do
+    write-report $commit
+done
