@@ -1,41 +1,39 @@
-use bytes::Bytes;
 use http_api_problem::HttpApiProblem;
-use once_cell::sync::OnceCell;
+
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use serde_with::skip_serializing_none;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use time::OffsetDateTime;
 use tokio::{
     join,
-    sync::{mpsc, oneshot},
-    time::sleep,
+    sync::{broadcast, mpsc, oneshot},
 };
+use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 use uuid::Uuid;
+use wot_serve::{
+    servient::{BuildServient, HttpRouter, ServientSettings},
+    Servient,
+};
 
 use axum::{
     extract::Path,
-    http::{header, StatusCode},
-    response::{IntoResponse, Json, Response},
-    routing::{delete, get, post, put},
-    Extension, Router,
-};
-use wot_td::{
-    builder::{
-        affordance::BuildableInteractionAffordance,
-        data_schema::{
-            BuildableDataSchema, IntegerDataSchemaBuilderLike, ObjectDataSchemaBuilderLike,
-            SpecializableDataSchema,
-        },
-        human_readable_info::BuildableHumanReadableInfo,
+    http::StatusCode,
+    response::{
+        sse::{self, KeepAlive},
+        IntoResponse, Json, Sse,
     },
-    thing::Thing,
+    Extension,
+};
+use wot_td::builder::{
+    BuildableDataSchema, BuildableHumanReadableInfo, BuildableInteractionAffordance,
+    IntegerDataSchemaBuilderLike, ObjectDataSchemaBuilderLike, SpecializableDataSchema,
 };
 
 struct Lamp {
-    is_on: bool,
-    brightness: u8,
-    actions: Vec<StoredAction>,
+    _is_on: bool,
+    _brightness: u8,
+    _actions: Vec<StoredAction>,
+    _temperature: u16,
 }
 
 const MESSAGE_QUEUE_LENGTH: usize = 16;
@@ -44,19 +42,67 @@ const MESSAGE_QUEUE_LENGTH: usize = 16;
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let thing = Thing::build("My Lamp")
+    let lamp = Lamp {
+        _is_on: true,
+        _brightness: 50,
+        _actions: Default::default(),
+        _temperature: 25,
+    };
+
+    let (message_sender, message_receiver) = mpsc::channel(MESSAGE_QUEUE_LENGTH);
+    let (event_sender, _event_receiver) = broadcast::channel(MESSAGE_QUEUE_LENGTH);
+
+    let app_state = AppState {
+        message_sender: message_sender.clone(),
+        event_sender: event_sender.clone(),
+    };
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let mut servient = Servient::builder("My Lamp")
         .finish_extend()
         .id("urn:dev:ops:my-lamp-1234")
         .attype("OnOffSwitch")
         .attype("Light")
         .description("A web connected lamp")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
+        .form(|b| {
+            b.href("/properties")
+                .http_get(properties)
+                .content_type("application/json")
+                .op(wot_td::thing::FormOperation::ReadAllProperties)
+        })
+        .form(|b| {
+            b.href("/properties/observe")
+                .http_get(observe_properties)
+                .op(wot_td::thing::FormOperation::ObserveAllProperties)
+                .op(wot_td::thing::FormOperation::UnobserveAllProperties)
+                .subprotocol("sse")
+        })
+        .form(|b| {
+            b.href("/actions")
+                .http_get(get_actions)
+                .content_type("application/json")
+                .op(wot_td::thing::FormOperation::QueryAllActions)
+        })
+        .form(|b| {
+            b.href("/events")
+                .http_get(all_events)
+                .op(wot_td::thing::FormOperation::SubscribeAllEvents)
+                .op(wot_td::thing::FormOperation::UnsubscribeAllEvents)
+                .subprotocol("sse")
+        })
         .property("on", |b| {
             b.finish_extend_data_schema()
                 .attype("OnOffProperty")
                 .title("On/Off")
                 .description("Whether the lamp is turned on")
-                .form(|b| b.href("/properties/on"))
+                .form(|b| {
+                    b.href("/properties/on")
+                        .http_get(get_on_property)
+                        .http_put(put_on_property)
+                        .op(wot_td::thing::FormOperation::ReadProperty)
+                        .op(wot_td::thing::FormOperation::WriteProperty)
+                })
                 .bool()
         })
         .property("brightness", |b| {
@@ -64,7 +110,21 @@ async fn main() {
                 .attype("BrightnessProperty")
                 .title("Brightness")
                 .description("The level of light from 0-100")
-                .form(|b| b.href("/properties/brightness"))
+                .form(|b| {
+                    b.href("/properties/brightness")
+                        .http_get(get_brightness_property)
+                        .http_put(put_brightness_property)
+                        .op(wot_td::thing::FormOperation::ReadProperty)
+                        .op(wot_td::thing::FormOperation::WriteProperty)
+                })
+                .form(|b| {
+                    b.href("/properties/brightness/observe")
+                        .http_get(observe_brightness)
+                        .op(wot_td::thing::FormOperation::ObserveProperty)
+                        .op(wot_td::thing::FormOperation::UnobserveProperty)
+                        .subprotocol("sse")
+                })
+                .observable(true)
                 .integer()
                 .minimum(0)
                 .maximum(100)
@@ -73,7 +133,23 @@ async fn main() {
         .action("fade", |b| {
             b.title("Fade")
                 .description("Fade the lamp to a given level")
-                .form(|b| b.href("/actions/fade"))
+                .form(|b| {
+                    b.href("/actions/fade")
+                        .http_post(post_fade_action)
+                        .op(wot_td::thing::FormOperation::InvokeAction)
+                })
+                .form(|b| {
+                    b.href("/actions/fade/{action_id}")
+                        .http_get(get_fade_action)
+                        .op(wot_td::thing::FormOperation::QueryAction)
+                        .http_delete(delete_fade_action)
+                        .op(wot_td::thing::FormOperation::CancelAction)
+                })
+                .uri_variable("action_id", |b| {
+                    b.finish_extend()
+                        .description("Identifier of the ongoing action")
+                        .string()
+                })
                 .input(|b| {
                     b.finish_extend()
                         .object()
@@ -91,58 +167,39 @@ async fn main() {
         })
         .event("overheated", |b| {
             b.description("The lamp has exceeded its safe operating temperature")
-                .form(|b| b.href("/events/overheated"))
+                .form(|b| {
+                    b.href("/events/overheated")
+                        .http_get(overheated_events)
+                        .op(wot_td::thing::FormOperation::SubscribeEvent)
+                        .op(wot_td::thing::FormOperation::UnsubscribeEvent)
+                        .subprotocol("sse")
+                })
                 .data(|b| b.finish_extend().number().unit("degree celsius"))
         })
-        .build()
+        .http_bind(addr)
+        .build_servient()
         .expect("cannot build Thing Descriptor for the lamp");
 
-    let lamp = Lamp {
-        is_on: true,
-        brightness: 50,
-        actions: Default::default(),
-    };
+    servient.router = servient.router.layer(Extension(app_state));
 
-    let (message_sender, message_receiver) = mpsc::channel(MESSAGE_QUEUE_LENGTH);
-
-    let app_state = AppState {
-        thing: Arc::new(thing),
-        message_sender: message_sender.clone(),
-    };
-
-    let app = Router::new()
-        .route("/", get(root))
-        .route("/.well-known/wot-thing-description", get(root))
-        .route("/properties", get(properties))
-        .route("/properties/:property", get(get_property))
-        .route("/properties/:property", put(put_property))
-        .route("/actions", get(get_actions))
-        .route("/actions/:action/:id", get(get_action))
-        .route("/actions/:action", post(post_action))
-        .route("/actions/:action/:id", delete(delete_action))
-        .route("/events", get(get_events))
-        .route("/events/:event", get(get_event))
-        .layer(Extension(app_state));
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     let axum_future = async {
         tracing::debug!("listening on {}", addr);
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service())
+        servient
+            .serve()
             .await
             .unwrap_or_else(|err| panic!("unable to create web server on address {addr}: {err}"));
     };
 
     join!(
-        handle_messages(lamp, message_sender, message_receiver),
+        handle_messages(lamp, message_sender, message_receiver, event_sender),
         axum_future
     );
 }
 
 #[derive(Clone)]
 struct AppState {
-    thing: Arc<Thing>,
     message_sender: mpsc::Sender<Message>,
+    event_sender: broadcast::Sender<Event>,
 }
 
 impl AppState {
@@ -196,8 +253,12 @@ impl AppState {
 
     #[inline]
     async fn delete_action(&self, name: ActionName, id: Uuid) -> bool {
-        self.use_oneshot(|sender| Message::DeleteAction { name, id, sender })
-            .await
+        self.use_oneshot(|sender| Message::DeleteAction {
+            _name: name,
+            _id: id,
+            _sender: sender,
+        })
+        .await
     }
 
     #[inline]
@@ -210,18 +271,13 @@ impl AppState {
             let time_requested = OffsetDateTime::now_utc();
             let duration = Duration::from_millis(duration);
             Message::Fade {
-                brightness,
-                time_requested,
-                duration,
-                sender,
+                _brightness: brightness,
+                _time_requested: time_requested,
+                _duration: duration,
+                _sender: sender,
             }
         })
         .await
-    }
-
-    #[inline]
-    async fn get_events(&self) -> Arc<Vec<Event>> {
-        self.use_oneshot(Message::GetEvents).await
     }
 }
 
@@ -234,171 +290,29 @@ enum Message {
     SetIsOn(bool),
     GetActions(oneshot::Sender<Arc<Vec<StoredAction>>>),
     DeleteAction {
-        sender: oneshot::Sender<bool>,
-        name: ActionName,
-        id: Uuid,
+        _sender: oneshot::Sender<bool>,
+        _name: ActionName,
+        _id: Uuid,
     },
     Fade {
-        brightness: u8,
-        time_requested: OffsetDateTime,
-        duration: Duration,
-        sender: oneshot::Sender<StoredAction>,
+        _brightness: u8,
+        _time_requested: OffsetDateTime,
+        _duration: Duration,
+        _sender: oneshot::Sender<StoredAction>,
     },
-    CompleteAction(Uuid),
-    GetEvents(oneshot::Sender<Arc<Vec<Event>>>),
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-enum Event {
-    Overheated {
-        data: u16,
-        #[serde(with = "time::serde::rfc3339")]
-        timestamp: OffsetDateTime,
-    },
-}
-
-impl Event {
-    fn to_overheated(&self) -> Option<&Self> {
-        match self {
-            Self::Overheated { .. } => Some(self),
-        }
-    }
-}
+enum Event {}
 
 async fn handle_messages(
-    lamp: Lamp,
-    message_sender: mpsc::Sender<Message>,
-    mut receiver: mpsc::Receiver<Message>,
+    _lamp: Lamp,
+    _message_sender: mpsc::Sender<Message>,
+    _receiver: mpsc::Receiver<Message>,
+    _event_sender: broadcast::Sender<Event>,
 ) {
-    use Message::*;
-
-    let Lamp {
-        mut is_on,
-        mut brightness,
-        actions,
-    } = lamp;
-    let mut actions = Arc::new(actions);
-    let mut events = Arc::new(Vec::new());
-
-    while let Some(message) = receiver.recv().await {
-        match message {
-            GetProperties(sender) => {
-                let properties = Properties {
-                    brightness,
-                    on: is_on,
-                };
-                sender.send(properties).unwrap();
-            }
-            GetBrightness(sender) => sender.send(brightness).unwrap(),
-            GetIsOn(sender) => sender.send(is_on).unwrap(),
-            SetBrightness(value) => brightness = value,
-            SetIsOn(value) => is_on = value,
-            GetActions(sender) => sender.send(Arc::clone(&actions)).unwrap(),
-            DeleteAction { sender, name, id } => {
-                let filter = match name {
-                    ActionName::Fade => StoredAction::to_fade,
-                };
-
-                let index = actions.iter().position(|action| {
-                    filter(action)
-                        .map(|action| action.id == id)
-                        .unwrap_or(false)
-                });
-
-                let removed = match index {
-                    Some(index) => {
-                        Arc::make_mut(&mut actions).swap_remove(index);
-                        true
-                    }
-                    None => false,
-                };
-                sender.send(removed).unwrap()
-            }
-            Fade {
-                brightness,
-                duration,
-                time_requested,
-                sender,
-            } => {
-                let now = OffsetDateTime::now_utc();
-                let real_duration = duration
-                    .saturating_sub((now - time_requested).try_into().unwrap_or(Duration::ZERO));
-                let id = Uuid::new_v4();
-                let href = format!("/actions/fade/{}", id);
-                let fade_action = ActionStatus {
-                    output: Some(FadeActionInput {
-                        brightness,
-                        duration: duration.as_millis().try_into().unwrap_or(u64::MAX),
-                    }),
-                    href: Some(href),
-                    time_requested: Some(time_requested),
-                    error: None,
-                    time_ended: None,
-                    status: ActionStatusStatus::Pending,
-                };
-
-                Arc::make_mut(&mut actions).push(StoredAction {
-                    id,
-                    ty: StoredActionType::Fade(ActionStatus {
-                        status: ActionStatusStatus::Created,
-                        ..fade_action.clone()
-                    }),
-                });
-                Arc::make_mut(&mut events).push(Event::Overheated {
-                    data: 102,
-                    timestamp: now,
-                });
-                let message_sender = message_sender.clone();
-                tokio::spawn(async move {
-                    sleep(real_duration).await;
-                    if let Err(err) = message_sender.send(CompleteAction(id)).await {
-                        tracing::warn!("unable to queue complete action: {err}");
-                    }
-                });
-
-                let action = StoredAction {
-                    id,
-                    ty: StoredActionType::Fade(fade_action),
-                };
-                sender.send(action).unwrap();
-            }
-            CompleteAction(id) => {
-                let actions = Arc::make_mut(&mut actions);
-                let action = match actions.iter_mut().find(|action| action.id == id) {
-                    Some(action) => action,
-                    None => {
-                        tracing::warn!("unable to complete action with id {id}");
-                        continue;
-                    }
-                };
-
-                let action = action.ty.to_fade_mut().unwrap();
-                let now = OffsetDateTime::now_utc();
-                if let Some(output) = action.output {
-                    brightness = output.brightness;
-                }
-                action.time_ended = Some(now);
-                action.status = ActionStatusStatus::Completed;
-            }
-            GetEvents(sender) => sender.send(Arc::clone(&events)).unwrap(),
-        }
-    }
-}
-
-async fn root(Extension(state): Extension<AppState>) -> impl IntoResponse {
-    static RESPONSE: OnceCell<Bytes> = OnceCell::new();
-
-    let response = RESPONSE.get_or_init(|| {
-        serde_json::to_vec(&state.thing)
-            .expect("unable to convert Thing description to JSON")
-            .into()
-    });
-
-    (
-        [(header::CONTENT_TYPE, "application/json")],
-        response.clone(),
-    )
+    todo!()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -427,64 +341,35 @@ enum PropertyName {
     On,
 }
 
-async fn get_property(
-    Path(property): Path<PropertyName>,
+fn handle_sse_stream<F>(
     Extension(state): Extension<AppState>,
-) -> Json<Value> {
-    let property: Value = match property {
-        PropertyName::Brightness => state.get_brightness().await.into(),
-        PropertyName::On => state.get_is_on().await.into(),
-    };
+    mut f: F,
+) -> Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>>
+where
+    F: FnMut(Event) -> Result<Option<sse::Event>, serde_json::Error> + Send + 'static,
+{
+    let receiver = BroadcastStream::new(state.event_sender.subscribe())
+        .filter_map(move |ev| ev.ok().and_then(|v| f(v).transpose()));
 
-    Json(property)
+    Sse::new(receiver).keep_alive(KeepAlive::default())
 }
 
-enum AppError {
-    InvalidValue,
+fn handle_overheated_event(_event: Event) -> Result<Option<sse::Event>, serde_json::Error> {
+    todo!()
 }
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            Self::InvalidValue => (StatusCode::BAD_REQUEST, "Invalid value"),
-        };
-
-        let body = Json(json!({
-            "error": error_message,
-        }));
-
-        (status, body).into_response()
-    }
+#[inline]
+async fn all_events(
+    extension: Extension<AppState>,
+) -> Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>> {
+    handle_sse_stream(extension, handle_overheated_event)
 }
 
-async fn put_property(
-    Path(property): Path<PropertyName>,
-    Json(value): Json<Value>,
-    Extension(state): Extension<AppState>,
-) -> Result<impl IntoResponse, AppError> {
-    match (property, value) {
-        (PropertyName::Brightness, Value::Number(value)) => {
-            let value = value
-                .as_u64()
-                .and_then(|value| value.try_into().ok())
-                .ok_or(AppError::InvalidValue)?;
-            state.set_brightness(value).await;
-        }
-        (PropertyName::On, Value::Bool(value)) => {
-            state.set_is_on(value).await;
-        }
-        _ => return Err(AppError::InvalidValue),
-    }
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn get_events(Extension(state): Extension<AppState>) -> impl IntoResponse {
-    let bytes: Bytes = serde_json::to_vec(&*state.get_events().await)
-        .expect("unable to convert Thing events to JSON")
-        .into();
-
-    ([(header::CONTENT_TYPE, "application/json")], bytes)
+#[inline]
+async fn overheated_events(
+    extension: Extension<AppState>,
+) -> Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>> {
+    handle_sse_stream(extension, handle_overheated_event)
 }
 
 async fn get_actions(Extension(state): Extension<AppState>) -> impl IntoResponse {
@@ -510,32 +395,19 @@ struct FadeActionInput {
 #[serde(rename_all = "camelCase")]
 struct StoredAction {
     #[serde(skip)]
-    id: Uuid,
+    _id: Uuid,
     #[serde(flatten)]
     ty: StoredActionType,
 }
 
-impl StoredAction {
-    fn to_fade(&self) -> Option<&Self> {
-        match &self.ty {
-            StoredActionType::Fade(_) => Some(self),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum ActionStatusStatus {
-    Created,
+    #[default]
     Pending,
+    Running,
     Completed,
     Failed,
-}
-
-impl Default for ActionStatusStatus {
-    fn default() -> Self {
-        Self::Created
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -545,12 +417,6 @@ enum StoredActionType {
 }
 
 impl StoredActionType {
-    fn to_fade_mut(&mut self) -> Option<&mut ActionStatus<FadeActionInput>> {
-        match self {
-            Self::Fade(fade) => Some(fade),
-        }
-    }
-
     fn name(&self) -> &'static str {
         match self {
             Self::Fade(_) => "fade",
@@ -585,89 +451,91 @@ enum ActionName {
     Fade,
 }
 
-impl ActionName {
-    fn is_fade(&self) -> bool {
-        match self {
-            Self::Fade => true,
-        }
-    }
-}
-
-async fn get_action(
-    Path((name, id)): Path<(ActionName, Uuid)>,
-    Extension(state): Extension<AppState>,
-) -> impl IntoResponse {
-    let filter = match name {
-        ActionName::Fade => StoredAction::to_fade,
-    };
-
-    let actions = state.get_actions().await;
-    match actions
-        .iter()
-        .filter_map(filter)
-        .find(|action| action.id == id)
-    {
-        Some(action) => (StatusCode::OK, Json(Some(action.clone()))),
-        None => (StatusCode::NOT_FOUND, Json(None)),
-    }
-}
-
-async fn delete_action(
-    Path((name, id)): Path<(ActionName, Uuid)>,
-    Extension(state): Extension<AppState>,
-) -> impl IntoResponse {
-    match state.delete_action(name, id).await {
-        true => StatusCode::NO_CONTENT,
-        false => StatusCode::NOT_FOUND,
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum EventName {
     Overheated,
 }
 
-async fn get_event(
-    Path(name): Path<EventName>,
-    Extension(state): Extension<AppState>,
-) -> Json<Vec<Event>> {
-    let filter = match name {
-        EventName::Overheated => Event::to_overheated,
-    };
-
-    Json(
-        state
-            .get_events()
-            .await
-            .iter()
-            .filter_map(filter)
-            .cloned()
-            .collect(),
-    )
+async fn get_on_property(Extension(app): Extension<AppState>) -> Json<bool> {
+    let is_on = app.get_is_on().await;
+    Json(is_on)
 }
 
-async fn post_action(
-    Path(action_name): Path<ActionName>,
-    Json(value): Json<Value>,
-    Extension(state): Extension<AppState>,
-) -> Result<impl IntoResponse, AppError> {
-    assert!(action_name.is_fade());
-    let fade: FadeActionInput =
-        serde_json::from_value(value).map_err(|_| AppError::InvalidValue)?;
+async fn put_on_property(
+    Json(value): Json<bool>,
+    Extension(app): Extension<AppState>,
+) -> impl IntoResponse {
+    app.set_is_on(value).await;
+    StatusCode::NO_CONTENT
+}
 
-    let action = state.fade(fade).await;
+async fn get_brightness_property(Extension(app): Extension<AppState>) -> Json<u8> {
+    let brightness = app.get_brightness().await;
+    Json(brightness)
+}
+
+async fn put_brightness_property(
+    Json(value): Json<u8>,
+    Extension(app): Extension<AppState>,
+) -> impl IntoResponse {
+    app.set_brightness(value).await;
+    StatusCode::NO_CONTENT
+}
+
+fn handle_brightness_stream(_event: Event) -> Result<Option<sse::Event>, serde_json::Error> {
+    todo!()
+}
+
+#[inline]
+async fn observe_brightness(
+    extension: Extension<AppState>,
+) -> Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>> {
+    handle_sse_stream(extension, handle_brightness_stream)
+}
+
+#[inline]
+async fn observe_properties(
+    extension: Extension<AppState>,
+) -> Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>> {
+    handle_sse_stream(extension, handle_brightness_stream)
+}
+
+async fn get_fade_action(
+    Path(_id): Path<Uuid>,
+    Extension(_app): Extension<AppState>,
+) -> impl IntoResponse {
+    todo!()
+}
+
+async fn post_fade_action(
+    Json(input): Json<FadeActionInput>,
+    Extension(state): Extension<AppState>,
+) -> impl IntoResponse {
+    let action = state.fade(input).await;
     let (output, href) = action.ty.into_output_href().unwrap();
 
     let response = ActionStatus {
-        status: ActionStatusStatus::Created,
+        status: ActionStatusStatus::Pending,
         output: Some(output),
         error: None,
-        href,
+        href: href.clone(),
         time_requested: None,
         time_ended: None,
     };
 
-    let response = (StatusCode::CREATED, Json(response));
-    Ok(response)
+    match href {
+        Some(href) => (StatusCode::CREATED, [("location", href)], Json(response)).into_response(),
+        None => (StatusCode::CREATED, Json(response)).into_response(),
+    }
+}
+
+async fn delete_fade_action(
+    Path(id): Path<Uuid>,
+    Extension(state): Extension<AppState>,
+) -> impl IntoResponse {
+    match state.delete_action(ActionName::Fade, id).await {
+        true => StatusCode::NO_CONTENT,
+        false => StatusCode::NOT_FOUND,
+    }
 }
