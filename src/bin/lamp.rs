@@ -2,13 +2,15 @@ use http_api_problem::HttpApiProblem;
 
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
-use time::OffsetDateTime;
+use std::{collections::HashMap, net::SocketAddr, ops::Not, sync::Arc, time::Duration};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::{
-    join,
+    join, select,
     sync::{broadcast, mpsc, oneshot},
+    time::sleep,
 };
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
+use tracing::warn;
 use uuid::Uuid;
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
@@ -18,10 +20,7 @@ use wot_serve::{
 use axum::{
     extract::Path,
     http::StatusCode,
-    response::{
-        sse::{self, KeepAlive},
-        IntoResponse, Json, Sse,
-    },
+    response::{sse, sse::KeepAlive, IntoResponse, Json, Sse},
     Extension,
 };
 use wot_td::builder::{
@@ -30,10 +29,10 @@ use wot_td::builder::{
 };
 
 struct Lamp {
-    _is_on: bool,
-    _brightness: u8,
-    _actions: Vec<StoredAction>,
-    _temperature: u16,
+    is_on: bool,
+    brightness: u8,
+    actions: Vec<StoredAction>,
+    temperature: u16,
 }
 
 const MESSAGE_QUEUE_LENGTH: usize = 16;
@@ -43,10 +42,10 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let lamp = Lamp {
-        _is_on: true,
-        _brightness: 50,
-        _actions: Default::default(),
-        _temperature: 25,
+        is_on: true,
+        brightness: 50,
+        actions: Default::default(),
+        temperature: 25,
     };
 
     let (message_sender, message_receiver) = mpsc::channel(MESSAGE_QUEUE_LENGTH);
@@ -253,12 +252,8 @@ impl AppState {
 
     #[inline]
     async fn delete_action(&self, name: ActionName, id: Uuid) -> bool {
-        self.use_oneshot(|sender| Message::DeleteAction {
-            _name: name,
-            _id: id,
-            _sender: sender,
-        })
-        .await
+        self.use_oneshot(|sender| Message::DeleteAction { name, id, sender })
+            .await
     }
 
     #[inline]
@@ -271,10 +266,10 @@ impl AppState {
             let time_requested = OffsetDateTime::now_utc();
             let duration = Duration::from_millis(duration);
             Message::Fade {
-                _brightness: brightness,
-                _time_requested: time_requested,
-                _duration: duration,
-                _sender: sender,
+                brightness,
+                time_requested,
+                duration,
+                sender,
             }
         })
         .await
@@ -290,29 +285,234 @@ enum Message {
     SetIsOn(bool),
     GetActions(oneshot::Sender<Arc<Vec<StoredAction>>>),
     DeleteAction {
-        _sender: oneshot::Sender<bool>,
-        _name: ActionName,
-        _id: Uuid,
+        sender: oneshot::Sender<bool>,
+        name: ActionName,
+        id: Uuid,
     },
     Fade {
-        _brightness: u8,
-        _time_requested: OffsetDateTime,
-        _duration: Duration,
-        _sender: oneshot::Sender<StoredAction>,
+        brightness: u8,
+        time_requested: OffsetDateTime,
+        duration: Duration,
+        sender: oneshot::Sender<StoredAction>,
     },
+    CompleteAction(Uuid),
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-enum Event {}
+enum Event {
+    Overheated {
+        data: u16,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
+    },
+
+    Brightness {
+        data: u8,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
+    },
+}
 
 async fn handle_messages(
-    _lamp: Lamp,
-    _message_sender: mpsc::Sender<Message>,
-    _receiver: mpsc::Receiver<Message>,
-    _event_sender: broadcast::Sender<Event>,
+    lamp: Lamp,
+    message_sender: mpsc::Sender<Message>,
+    mut receiver: mpsc::Receiver<Message>,
+    event_sender: broadcast::Sender<Event>,
 ) {
-    todo!()
+    let Lamp {
+        mut is_on,
+        mut brightness,
+        actions,
+        mut temperature,
+    } = lamp;
+    let mut actions = Arc::new(actions);
+
+    let mut interval = tokio::time::interval(Duration::from_millis(10));
+    let mut fader = Fader::default();
+
+    loop {
+        select! {
+            message = receiver.recv() => {
+                match message {
+                    Some(message) => handle_message(
+                        message,
+                        &mut is_on,
+                        &mut brightness,
+                        &mut actions,
+                        &mut fader,
+                        &message_sender,
+                        &event_sender
+                    ).await,
+
+                    None => break,
+                }
+            }
+
+            _ = interval.tick() => {
+                handle_tick(is_on, &mut brightness, &mut temperature, &mut fader, &event_sender);
+            }
+        }
+    }
+}
+
+fn handle_tick(
+    is_on: bool,
+    brightness: &mut u8,
+    temperature: &mut u16,
+    fader: &mut Fader,
+    event_sender: &broadcast::Sender<Event>,
+) {
+    fader.tick(brightness, event_sender);
+
+    if is_on && *brightness > 50 {
+        if *temperature < 200 {
+            *temperature = temperature.saturating_add(1);
+        }
+    } else if *temperature > 25 {
+        *temperature -= 1;
+    }
+
+    let temperature = *temperature;
+    if temperature > 100 {
+        event_sender
+            .send(Event::Overheated {
+                data: temperature,
+                timestamp: OffsetDateTime::now_utc(),
+            })
+            .expect("events channel should be open");
+    }
+}
+
+async fn handle_message(
+    message: Message,
+    is_on: &mut bool,
+    brightness: &mut u8,
+    actions: &mut Arc<Vec<StoredAction>>,
+    fader: &mut Fader,
+    message_sender: &mpsc::Sender<Message>,
+    event_sender: &broadcast::Sender<Event>,
+) {
+    use Message::*;
+
+    match message {
+        GetProperties(sender) => {
+            let properties = Properties {
+                brightness: *brightness,
+                on: *is_on,
+            };
+            sender.send(properties).unwrap();
+        }
+        GetBrightness(sender) => sender.send(*brightness).unwrap(),
+        GetIsOn(sender) => sender.send(*is_on).unwrap(),
+        SetBrightness(value) => {
+            *brightness = value;
+            if let Err(err) = event_sender.send(Event::Brightness {
+                data: value,
+                timestamp: OffsetDateTime::now_utc(),
+            }) {
+                warn!("unable to send brightness event: {err}");
+            }
+        }
+        SetIsOn(value) => *is_on = value,
+        GetActions(sender) => sender.send(Arc::clone(actions)).unwrap(),
+        DeleteAction { sender, name, id } => {
+            let filter = match name {
+                ActionName::Fade => StoredAction::to_fade,
+            };
+
+            let index = actions.iter().position(|action| {
+                filter(action)
+                    .map(|action| action.id == id)
+                    .unwrap_or(false)
+            });
+
+            let removed = match index {
+                Some(index) => {
+                    Arc::make_mut(actions).swap_remove(index);
+                    true
+                }
+                None => false,
+            };
+            sender.send(removed).unwrap()
+        }
+        Fade {
+            brightness: fade_brightness,
+            duration,
+            time_requested,
+            sender,
+        } => {
+            let fade_brightness = fade_brightness.min(100);
+            let now = OffsetDateTime::now_utc();
+            let real_duration = duration
+                .saturating_sub((now - time_requested).try_into().unwrap_or(Duration::ZERO));
+            let id = Uuid::new_v4();
+            let href = format!("/actions/fade/{}", id);
+            let fade_action = ActionStatus {
+                output: Some(FadeActionInput {
+                    brightness: fade_brightness,
+                    duration: duration.as_millis().try_into().unwrap_or(u64::MAX),
+                }),
+                href: Some(href),
+                time_requested: Some(time_requested),
+                error: None,
+                time_ended: None,
+                status: ActionStatusStatus::Pending,
+            };
+
+            Arc::make_mut(actions).push(StoredAction {
+                id,
+                ty: StoredActionType::Fade(ActionStatus {
+                    status: ActionStatusStatus::Pending,
+                    ..fade_action.clone()
+                }),
+            });
+
+            if is_on.not() {
+                *brightness = 0;
+                if event_sender
+                    .send(Event::Brightness {
+                        data: 0,
+                        timestamp: now,
+                    })
+                    .is_err()
+                {
+                    warn!("unable to send brightness event when starting a fade action with the lump off");
+                }
+                *is_on = true;
+            }
+            fader.fade(*brightness, fade_brightness, duration);
+
+            let message_sender = message_sender.clone();
+            tokio::spawn(async move {
+                sleep(real_duration).await;
+                if let Err(err) = message_sender.send(CompleteAction(id)).await {
+                    tracing::warn!("unable to queue complete action: {err}");
+                }
+            });
+
+            let action = StoredAction {
+                id,
+                ty: StoredActionType::Fade(fade_action),
+            };
+            sender.send(action).unwrap();
+        }
+        CompleteAction(id) => {
+            let actions = Arc::make_mut(actions);
+            let action = match actions.iter_mut().find(|action| action.id == id) {
+                Some(action) => action,
+                None => {
+                    tracing::warn!("unable to complete action with id {id}");
+                    return;
+                }
+            };
+
+            let action = action.ty.to_fade_mut().unwrap();
+            let now = OffsetDateTime::now_utc();
+            action.time_ended = Some(now);
+            action.status = ActionStatusStatus::Completed;
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -354,8 +554,17 @@ where
     Sse::new(receiver).keep_alive(KeepAlive::default())
 }
 
-fn handle_overheated_event(_event: Event) -> Result<Option<sse::Event>, serde_json::Error> {
-    todo!()
+fn handle_overheated_event(event: Event) -> Result<Option<sse::Event>, serde_json::Error> {
+    match event {
+        Event::Overheated { data, timestamp } => {
+            let mut event = sse::Event::default().event("overheated").json_data(data)?;
+            if let Ok(timestamp) = timestamp.format(&Rfc3339) {
+                event = event.id(timestamp);
+            }
+            Ok(Some(event))
+        }
+        _ => Ok(None),
+    }
 }
 
 #[inline]
@@ -395,9 +604,17 @@ struct FadeActionInput {
 #[serde(rename_all = "camelCase")]
 struct StoredAction {
     #[serde(skip)]
-    _id: Uuid,
+    id: Uuid,
     #[serde(flatten)]
     ty: StoredActionType,
+}
+
+impl StoredAction {
+    fn to_fade(&self) -> Option<&Self> {
+        match &self.ty {
+            StoredActionType::Fade(_) => Some(self),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, Deserialize, Serialize)]
@@ -417,6 +634,12 @@ enum StoredActionType {
 }
 
 impl StoredActionType {
+    fn to_fade_mut(&mut self) -> Option<&mut ActionStatus<FadeActionInput>> {
+        match self {
+            Self::Fade(fade) => Some(fade),
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Self::Fade(_) => "fade",
@@ -483,8 +706,17 @@ async fn put_brightness_property(
     StatusCode::NO_CONTENT
 }
 
-fn handle_brightness_stream(_event: Event) -> Result<Option<sse::Event>, serde_json::Error> {
-    todo!()
+fn handle_brightness_stream(event: Event) -> Result<Option<sse::Event>, serde_json::Error> {
+    match event {
+        Event::Brightness { data, timestamp } => {
+            let mut event = sse::Event::default().event("brightness").json_data(data)?;
+            if let Ok(timestamp) = timestamp.format(&Rfc3339) {
+                event = event.id(timestamp);
+            }
+            Ok(Some(event))
+        }
+        _ => Ok(None),
+    }
 }
 
 #[inline]
@@ -502,10 +734,53 @@ async fn observe_properties(
 }
 
 async fn get_fade_action(
-    Path(_id): Path<Uuid>,
-    Extension(_app): Extension<AppState>,
+    Path(id): Path<Uuid>,
+    Extension(app): Extension<AppState>,
 ) -> impl IntoResponse {
-    todo!()
+    let actions = app.get_actions().await;
+    match actions
+        .iter()
+        .filter_map(StoredAction::to_fade)
+        .find(|action| action.id == id)
+    {
+        Some(action) => {
+            let StoredActionType::Fade(fade_action) = &action.ty;
+            let fade_out = match fade_action.status {
+                ActionStatusStatus::Pending | ActionStatusStatus::Running => ActionStatus {
+                    status: fade_action.status,
+                    output: None,
+                    error: None,
+                    href: fade_action.href.clone(),
+                    time_requested: fade_action.time_requested,
+                    time_ended: None,
+                },
+                ActionStatusStatus::Completed => ActionStatus {
+                    status: fade_action.status,
+                    output: fade_action.output,
+                    error: None,
+                    href: fade_action.href.clone(),
+                    time_requested: fade_action.time_requested,
+                    time_ended: fade_action.time_ended,
+                },
+                ActionStatusStatus::Failed => ActionStatus {
+                    status: fade_action.status,
+                    output: None,
+                    error: fade_action.error.clone(),
+                    href: fade_action.href.clone(),
+                    time_requested: fade_action.time_requested,
+                    time_ended: fade_action.time_ended,
+                },
+            };
+            (
+                StatusCode::OK,
+                Json(Some(StoredAction {
+                    id,
+                    ty: StoredActionType::Fade(fade_out),
+                })),
+            )
+        }
+        None => (StatusCode::NOT_FOUND, Json(None)),
+    }
 }
 
 async fn post_fade_action(
@@ -537,5 +812,59 @@ async fn delete_fade_action(
     match state.delete_action(ActionName::Fade, id).await {
         true => StatusCode::NO_CONTENT,
         false => StatusCode::NOT_FOUND,
+    }
+}
+
+// Not Darth
+#[derive(Debug, Default)]
+struct Fader {
+    active: bool,
+    tick: u32,
+    ticks: u32,
+    initial_brightness: u8,
+    delta_brightness: i8,
+}
+
+impl Fader {
+    fn tick(&mut self, brightness: &mut u8, event_sender: &broadcast::Sender<Event>) {
+        if self.active.not() {
+            return;
+        }
+
+        let current_delta = (f64::from(self.delta_brightness) / f64::from(self.ticks)
+            * f64::from(self.tick + 1)) as i8;
+        // `as` is fine because brightness MUST be between 0 and 100.
+        // This will be better when `saturating_add_signed` is stable.
+        let new_brightness = (self.initial_brightness as i8)
+            .saturating_add(current_delta)
+            .clamp(0, 100) as u8;
+
+        if *brightness != new_brightness {
+            *brightness = new_brightness;
+            let timestamp = OffsetDateTime::now_utc();
+            if event_sender
+                .send(Event::Brightness {
+                    data: new_brightness,
+                    timestamp,
+                })
+                .is_err()
+            {
+                warn!("cannot send brightness event during fading tick");
+            }
+        }
+
+        self.tick += 1;
+        if self.tick >= self.ticks {
+            self.active = false;
+        }
+    }
+
+    fn fade(&mut self, current_brightness: u8, final_brightness: u8, duration: Duration) {
+        self.active = true;
+        self.tick = 0;
+        // We are using 10ms ticks
+        self.ticks = u32::try_from(duration.as_millis()).unwrap_or(u32::MAX) / 10;
+        self.initial_brightness = current_brightness;
+        self.delta_brightness = (final_brightness as i8) - (current_brightness as i8);
     }
 }
