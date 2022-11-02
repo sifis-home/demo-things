@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 serde_json = "1.0"
 uuid = { version = "1.1.1", features = ["v4", "serde"] }
-wot-td = { git = "https://github.com/sifis-home/wot-rust" }
+wot-td = "0.2.0"
 axum = "0.5.6"
 tokio = { version = "1.18.2", features = ["macros", "time"] }
 tracing-subscriber = { version = "0.3.11", features = ["fmt"] }
@@ -17,5 +17,7 @@ bytes = "1.1.0"
 time = { version = "0.3.9", features = ["serde", "serde-well-known"] }
 serde_with = "1.14.0"
 http-api-problem = "0.52.0"
+wot-serve = "0.2.0"
+tokio-stream = { version = "0.1.9", features = ["sync"] }
 
 [features]
