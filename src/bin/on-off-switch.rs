@@ -1,3 +1,4 @@
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tokio::{
@@ -24,9 +25,17 @@ struct Thing {
 
 const MESSAGE_QUEUE_LENGTH: usize = 16;
 
+#[derive(Parser)]
+struct Cli {
+    /// Add the Light @type to the switch
+    #[clap(short, long)]
+    light: bool,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     tracing_subscriber::fmt::init();
+    let cli = Cli::parse();
 
     let thing = Thing { is_on: true };
 
@@ -37,10 +46,14 @@ async fn main() {
     };
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    let mut servient = Servient::builder("On-Off Switch")
+    let mut thing_builder = Servient::builder("On-Off Switch")
         .finish_extend()
         .id("urn:dev:ops:on-off-1234")
-        .attype("OnOffSwitch")
+        .attype("OnOffSwitch");
+    if cli.light {
+        thing_builder = thing_builder.attype("Light");
+    }
+    let mut servient = thing_builder
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .property("on", |b| {
             b.finish_extend_data_schema()

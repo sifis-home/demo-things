@@ -19,5 +19,6 @@ serde_with = "1.14.0"
 http-api-problem = "0.52.0"
 wot-serve = "0.2.0"
 tokio-stream = { version = "0.1.9", features = ["sync"] }
+clap = { version = "4.0.22", features = ["derive"] }
 
 [features]
