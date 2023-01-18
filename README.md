@@ -7,6 +7,11 @@
 - [ ] Oven
 - [ ] Fridge
 
+## Supported platforms
+
+- [x] Unix-like
+- [ ] Windows
+
 ## Running the demos
 
 Each demo is an independent binary, which can be run with:
