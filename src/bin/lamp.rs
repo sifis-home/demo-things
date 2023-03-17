@@ -2,7 +2,7 @@ use http_api_problem::HttpApiProblem;
 
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
-use std::{collections::HashMap, net::SocketAddr, ops::Not, sync::Arc, time::Duration};
+use std::{collections::HashMap, ops::Not, sync::Arc, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::{
     join, select,
@@ -29,6 +29,9 @@ use wot_td::builder::{
     IntegerDataSchemaBuilderLike, ObjectDataSchemaBuilderLike, SpecializableDataSchema,
 };
 
+use clap::Parser;
+use demo_things::CliCommon;
+
 struct Lamp {
     is_on: bool,
     brightness: u8,
@@ -40,7 +43,9 @@ const MESSAGE_QUEUE_LENGTH: usize = 16;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    let cli = CliCommon::parse();
+
+    cli.setup_tracing();
 
     let lamp = Lamp {
         is_on: true,
@@ -57,7 +62,7 @@ async fn main() {
         event_sender: event_sender.clone(),
     };
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = cli.socket_addr();
     let mut servient = Servient::builder("My Lamp")
         .finish_extend()
         .id("urn:dev:ops:my-lamp-1234")
