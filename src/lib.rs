@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::EnvFilter;
 
 /// SIFIS-Home wot-rust demo thing
 ///
@@ -30,14 +30,17 @@ pub struct CliCommon {
 impl CliCommon {
     pub fn setup_tracing(&self) {
         let filter = match self.verbose {
-            0 => LevelFilter::ERROR,
-            1 => LevelFilter::WARN,
-            2 => LevelFilter::INFO,
-            3 => LevelFilter::DEBUG,
-            _ => LevelFilter::TRACE,
+            0 => "error",
+            1 => "warn",
+            2 => "info",
+            3 => "debug",
+            _ => "trace",
         };
+        let filter = EnvFilter::try_from_default_env()
+            .or_else(|_| EnvFilter::try_new(filter))
+            .unwrap();
 
-        tracing_subscriber::fmt().with_max_level(filter).init()
+        tracing_subscriber::fmt().with_env_filter(filter).init()
     }
 
     pub fn socket_addr(&self) -> SocketAddr {
