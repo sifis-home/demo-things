@@ -1,4 +1,21 @@
-use std::net::SocketAddr;
+use futures_util::{FutureExt, Stream};
+use pin_project_lite::pin_project;
+use serde::Deserialize;
+use signal_hook_tokio::{Signals, SignalsInfo};
+use tracing::error;
+
+use std::{
+    borrow::Borrow,
+    ffi::c_int,
+    future::Future,
+    marker::PhantomData,
+    mem,
+    net::SocketAddr,
+    ops::Not,
+    path::PathBuf,
+    pin::Pin,
+    task::{self, ready, Poll},
+};
 
 use clap::Parser;
 use tracing_subscriber::filter::EnvFilter;
@@ -45,5 +62,156 @@ impl CliCommon {
 
     pub fn socket_addr(&self) -> SocketAddr {
         SocketAddr::from((self.bind_addr, self.listen_port))
+    }
+}
+
+pub fn config_signal_loader<I, S, T>(
+    signals: I,
+    config_path: impl Into<PathBuf>,
+) -> ConfigSignalLoader<T>
+where
+    I: IntoIterator<Item = S>,
+    S: Borrow<c_int>,
+{
+    let signals = Signals::new(signals).expect("unable to create signal handlers");
+    let handle = signals.handle();
+    let config_path = config_path.into();
+    let stream = ConfigSignalLoaderStream {
+        signals,
+        inner: ConfigSignalLoaderStreamInner::None(ConfigSignalLoaderStreamInnerStatus {
+            config_path,
+            handle: handle.clone(),
+            _marker: PhantomData,
+        }),
+    };
+
+    ConfigSignalLoader { stream, handle }
+}
+
+pub struct ConfigSignalLoader<T> {
+    pub stream: ConfigSignalLoaderStream<T>,
+    pub handle: signal_hook_tokio::Handle,
+}
+
+impl<T> Drop for ConfigSignalLoader<T> {
+    fn drop(&mut self) {
+        if self.handle.is_closed().not() {
+            self.handle.close();
+        }
+    }
+}
+
+pin_project! {
+    pub struct ConfigSignalLoaderStream<T> {
+        #[pin]
+        signals: SignalsInfo,
+        inner: ConfigSignalLoaderStreamInner<T>,
+    }
+}
+
+enum ConfigSignalLoaderStreamInner<T> {
+    None(ConfigSignalLoaderStreamInnerStatus<T>),
+    Future(Pin<Box<ConfigSignalLoaderStreamInnerFuture<T>>>),
+    Invalid,
+}
+
+type ConfigSignalLoaderStreamInnerFuture<T> =
+    dyn Future<Output = (Option<T>, ConfigSignalLoaderStreamInnerStatus<T>)>;
+
+struct ConfigSignalLoaderStreamInnerStatus<T> {
+    config_path: PathBuf,
+    handle: signal_hook_tokio::Handle,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Stream for ConfigSignalLoaderStream<T>
+where
+    T: for<'de> Deserialize<'de> + 'static,
+{
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            let this = self.as_mut().project();
+            match this.inner.future_or_inner() {
+                Err(inner) => {
+                    if ready!(this.signals.poll_next(cx)).is_none() {
+                        if inner.handle.is_closed().not() {
+                            inner.handle.close();
+                        }
+                        return Poll::Ready(None);
+                    };
+
+                    let status = this.inner.take_none().unwrap();
+
+                    let mut future = async move {
+                        let raw_config = match tokio::fs::read(&status.config_path).await {
+                            Ok(config) => config,
+                            Err(err) => {
+                                error!("unable to read config file: {err}");
+                                status.handle.close();
+                                return (None, status);
+                            }
+                        };
+
+                        let new_config = match toml::from_slice::<T>(&raw_config) {
+                            Ok(new_config) => Some(new_config),
+                            Err(err) => {
+                                error!("unable to parse config file: {err}");
+                                status.handle.close();
+                                None
+                            }
+                        };
+                        (new_config, status)
+                    }
+                    .boxed();
+
+                    match future.poll_unpin(cx) {
+                        Poll::Ready((new_config, status)) => {
+                            *this.inner = ConfigSignalLoaderStreamInner::None(status);
+                            if let Some(new_config) = new_config {
+                                return Poll::Ready(Some(new_config));
+                            }
+                        }
+                        Poll::Pending => {
+                            *this.inner = ConfigSignalLoaderStreamInner::Future(future);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+                Ok(mut future) => {
+                    let (new_config, status) = ready!(future.poll_unpin(cx));
+                    *this.inner = ConfigSignalLoaderStreamInner::None(status);
+                    if let Some(new_config) = new_config {
+                        return Poll::Ready(Some(new_config));
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T> ConfigSignalLoaderStreamInner<T> {
+    fn future_or_inner(
+        &mut self,
+    ) -> Result<
+        Pin<&mut ConfigSignalLoaderStreamInnerFuture<T>>,
+        &ConfigSignalLoaderStreamInnerStatus<T>,
+    > {
+        match self {
+            Self::None(ref inner) => Err(inner),
+            Self::Future(future) => Ok(future.as_mut()),
+            Self::Invalid => panic!("invalid ConfigSignalLoaderStream state"),
+        }
+    }
+
+    fn take_none(&mut self) -> Option<ConfigSignalLoaderStreamInnerStatus<T>> {
+        match self {
+            Self::None(_) => match mem::replace(self, Self::Invalid) {
+                Self::None(sender) => Some(sender),
+                _ => unreachable!(),
+            },
+            _ => None,
+        }
     }
 }
