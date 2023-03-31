@@ -1,14 +1,16 @@
 use clap::Parser;
-use futures_util::StreamExt;
+use demo_things::{config_signal_loader, OptionStream};
+use futures_concurrency::stream::Merge;
+use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::SIGHUP;
-use signal_hook_tokio::Signals;
-use std::{net::SocketAddr, ops::Not, path::PathBuf, time::Duration, vec};
+use std::{future, net::SocketAddr, ops::Not, path::PathBuf, time::Duration, vec};
 use tokio::{
-    join, select,
+    join,
     sync::{mpsc, oneshot},
 };
-use tracing::{error, info, instrument, trace, warn};
+use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
+use tracing::{info, instrument, trace, warn};
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
     Servient,
@@ -176,10 +178,7 @@ async fn main() {
             .unwrap_or_else(|err| panic!("unable to create web server on address {addr}: {err}"));
     };
 
-    join!(
-        handle_messages(thing, message_receiver, message_sender, &cli),
-        axum_future
-    );
+    join!(handle_messages(thing, message_receiver, &cli), axum_future);
 }
 
 #[derive(Clone)]
@@ -221,106 +220,78 @@ impl AppState {
 enum Message {
     GetTemperature(oneshot::Sender<f32>),
     GetHumidity(oneshot::Sender<f32>),
-    SetConfig(Config),
 }
 
-async fn handle_messages(
-    thing: Thing,
-    mut receiver: mpsc::Receiver<Message>,
-    sender: mpsc::Sender<Message>,
-    cli: &Cli,
-) {
+async fn handle_messages(thing: Thing, receiver: mpsc::Receiver<Message>, cli: &Cli) {
+    #[derive(Debug)]
+    enum Event {
+        Message(Message),
+        Config(Config),
+        Tick,
+        Stop,
+    }
+
+    let create_interval_stream = || {
+        OptionStream::from(Some(
+            IntervalStream::new(tokio::time::interval(Duration::from_millis(10)))
+                .map(|_| Event::Tick),
+        ))
+    };
+
     let Thing {
         mut temperature,
         mut humidity,
     } = thing;
 
-    let signals = Signals::new([SIGHUP]).expect("unable to create signal handlers");
-    let signals_handle = signals.handle();
-    let signals_task = tokio::spawn(handle_signals(
-        signals,
-        cli.config.to_owned(),
-        sender.clone(),
-    ));
+    let mut csl = config_signal_loader([SIGHUP], &cli.config);
 
-    let mut interval = tokio::time::interval(TICK_DURATION);
-    // Skip immediate tick
-    interval.tick().await;
-    let mut maybe_interval = Some(interval);
+    let mut interval_stream = create_interval_stream();
+    let mut receiver_stream = ReceiverStream::new(receiver)
+        .map(Event::Message)
+        .chain(stream::once(future::ready(Event::Stop)));
+    let mut csl_stream = csl.stream.by_ref().map(Event::Config);
 
-    macro_rules! handle_message {
-        ($message:expr) => {{
-            let Some(message) = $message else {
-                                error!("Messages channel has been closed unexpectedly. Stopping.");
-                                signals_handle.close();
-                                if let Err(err) = signals_task.await {
-                                    error!("Error received signals task on joining: {err}");
-                                }
-                                break;
-                            };
+    'outer: loop {
+        let mut events_stream =
+            (&mut receiver_stream, &mut csl_stream, &mut interval_stream).merge();
 
-            if let Some(config) =
-                handle_message(message, temperature.current, humidity.current).await
-            {
-                info!("New config obtained. Resetting sensor statuses to new config.");
+        loop {
+            let Some(event) = events_stream.next().await else {
+                break 'outer;
+            };
 
-                humidity = SensorStatus {
-                    current: humidity.current,
-                    ..config.humidity.into()
-                };
-                temperature = SensorStatus {
-                    current: temperature.current,
-                    ..config.temperature.into()
-                };
-                maybe_interval = {
-                    let mut interval = tokio::time::interval(TICK_DURATION);
-                    // Skip immediate tick
-                    interval.tick().await;
-                    Some(interval)
-                };
-            }
-        }};
-    }
+            match event {
+                Event::Message(message) => {
+                    handle_message(message, temperature.current, humidity.current).await
+                }
+                Event::Tick => {
+                    let temperature_ticked = temperature.tick();
+                    let humidity_ticked = humidity.tick();
 
-    loop {
-        match &mut maybe_interval {
-            Some(interval) => {
-                select! {
-                    message = receiver.recv() => handle_message!(message),
-
-                    _ = interval.tick() => {
-                        let temperature_ticked = temperature.tick();
-                        let humidity_ticked = humidity.tick();
-
-                        if temperature_ticked.not() & humidity_ticked.not() {
-                            maybe_interval = None;
-                        }
+                    if temperature_ticked.not() & humidity_ticked.not() {
+                        interval_stream = None.into();
+                        break;
                     }
                 }
-            }
-            None => handle_message!(receiver.recv().await),
-        }
-    }
-}
+                Event::Config(config) => {
+                    info!("New config obtained. Resetting sensor statuses to new config.");
 
-async fn handle_signals(mut signals: Signals, config_file: PathBuf, sender: mpsc::Sender<Message>) {
-    while let Some(signal) = signals.next().await {
-        assert_eq!(signal, SIGHUP);
-        let raw_config = match std::fs::read(&config_file) {
-            Ok(config) => config,
-            Err(err) => {
-                error!("unable to read config file: {err}");
-                continue;
-            }
-        };
+                    humidity = SensorStatus {
+                        current: humidity.current,
+                        ..config.humidity.into()
+                    };
+                    temperature = SensorStatus {
+                        current: temperature.current,
+                        ..config.temperature.into()
+                    };
 
-        match toml::from_slice(&raw_config) {
-            Ok(new_config) => {
-                if sender.send(Message::SetConfig(new_config)).await.is_err() {
-                    error!("unable to send new config through channel: channel is closed.");
+                    interval_stream = create_interval_stream();
+                    // Skip immediate tick
+                    interval_stream.next().await;
+                    break;
                 }
+                Event::Stop => break 'outer,
             }
-            Err(err) => error!("unable to parse config file: {err}"),
         }
     }
 }
@@ -417,19 +388,16 @@ impl Interpolation {
     }
 }
 
-async fn handle_message(message: Message, temperature: f32, humidity: f32) -> Option<Config> {
+async fn handle_message(message: Message, temperature: f32, humidity: f32) {
     use Message::*;
 
     match message {
         GetTemperature(sender) => {
             sender.send(temperature).unwrap();
-            None
         }
         GetHumidity(sender) => {
             sender.send(humidity).unwrap();
-            None
         }
-        SetConfig(new_config) => Some(new_config),
     }
 }
 
