@@ -1,5 +1,5 @@
 use clap::Parser;
-use demo_things::config_signal_loader;
+use demo_things::{config_signal_loader, SimulationStream};
 use door::*;
 use futures_concurrency::stream::Merge;
 use futures_util::{stream, StreamExt};
@@ -309,16 +309,9 @@ async fn handle_messages(thing: Thing, receiver: mpsc::Receiver<Message>, cli: &
 }
 
 mod door {
-    use std::{
-        fmt,
-        future::Future,
-        pin::Pin,
-        task::{self, ready, Poll},
-    };
+    use std::fmt;
 
-    use futures_util::{stream::FusedStream, Stream};
-    use pin_project_lite::pin_project;
-    use tokio::time::Sleep;
+    use demo_things::Simulation;
 
     use super::*;
 
@@ -474,77 +467,13 @@ mod door {
         }
     }
 
-    pin_project! {
-        #[project_replace = SimulationStreamProjReplace]
-        pub struct SimulationStream {
-            simulations: vec::IntoIter<DoorSimulation>,
-            #[pin]
-            next_status: Option<SimulationStreamNext>,
-        }
-    }
+    impl Simulation for DoorSimulation {
+        type Output = SimulationStreamItem;
 
-    pin_project! {
-        #[project_replace = SimulationStreamNextProjReplace]
-        struct SimulationStreamNext {
-            #[pin]
-            sleep: Sleep,
-            output: SimulationStreamItem,
-        }
-    }
-
-    impl SimulationStream {
-        pub(crate) fn new(simulations: impl Into<vec::IntoIter<DoorSimulation>>) -> Self {
-            let mut simulations = simulations.into();
-            let next_status = simulations.next().map(SimulationStreamNext::from);
-
-            Self {
-                simulations,
-                next_status,
-            }
-        }
-    }
-
-    impl Stream for SimulationStream {
-        type Item = SimulationStreamItem;
-
-        fn poll_next(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
-            let mut this = self.project();
-            let Some(mut next_status) = this.next_status.as_mut().as_pin_mut() else {
-                return Poll::Ready(None);
-            };
-
-            ready!(next_status.as_mut().project().sleep.poll(cx));
-            let current_status = match this.simulations.next() {
-                Some(next_simulation) => next_status.project_replace(next_simulation.into()).output,
-                None => {
-                    let current_status = this
-                        .next_status
-                        .as_ref()
-                        .as_pin_ref()
-                        .unwrap()
-                        .as_ref()
-                        .output;
-                    this.next_status.as_mut().set(None);
-                    current_status
-                }
-            };
-            Poll::Ready(Some(current_status))
-        }
-    }
-
-    impl FusedStream for SimulationStream {
-        #[inline]
-        fn is_terminated(&self) -> bool {
-            self.next_status.is_none()
-        }
-    }
-
-    impl From<DoorSimulation> for SimulationStreamNext {
-        fn from(value: DoorSimulation) -> Self {
-            let DoorSimulation { wait, open, lock } = value;
-            let sleep = tokio::time::sleep(wait);
+        fn output_and_wait(self) -> (Self::Output, Duration) {
+            let DoorSimulation { wait, open, lock } = self;
             let output = SimulationStreamItem { open, lock };
-            Self { sleep, output }
+            (output, wait)
         }
     }
 
