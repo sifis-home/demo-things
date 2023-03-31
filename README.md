@@ -10,7 +10,6 @@
 ## Supported platforms
 
 - [x] Unix-like
-- [ ] Windows
 
 ## Running the demos
 
