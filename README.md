@@ -2,7 +2,11 @@
 
 ## Things
 
-- [ ] Lamp
+- [x] Lamp
+- [x] On-Off Switch
+- [x] Sink
+- [x] Ticking Door
+- [x] Ticking Sensor
 - [ ] Cooker
 - [ ] Oven
 - [ ] Fridge
