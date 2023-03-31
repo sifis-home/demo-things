@@ -1,3 +1,7 @@
+mod simulation;
+
+pub use simulation::{Simulation, SimulationStream};
+
 use futures_util::{FutureExt, Stream};
 use pin_project_lite::pin_project;
 use serde::{Deserialize, Serialize};
