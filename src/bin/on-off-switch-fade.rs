@@ -1,14 +1,19 @@
 use clap::Parser;
 use demo_things::CliCommon;
+use futures_concurrency::{future::Join, stream::Merge};
+use futures_util::stream;
 use http_api_problem::HttpApiProblem;
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
-use std::{ops::Not, sync::Arc, time::Duration};
+use std::{future::ready, ops::Not, sync::Arc, time::Duration};
 use time::OffsetDateTime;
 use tokio::{
-    join, select,
     sync::{mpsc, oneshot},
     time::sleep,
+};
+use tokio_stream::{
+    wrappers::{IntervalStream, ReceiverStream},
+    StreamExt,
 };
 use uuid::Uuid;
 use wot_serve::{
@@ -122,10 +127,12 @@ async fn main() {
             .unwrap_or_else(|err| panic!("unable to create web server on address {addr}: {err}"));
     };
 
-    join!(
+    (
         handle_messages(thing, message_sender, message_receiver),
-        axum_future
-    );
+        axum_future,
+    )
+        .join()
+        .await;
 }
 
 #[derive(Clone)]
@@ -249,8 +256,14 @@ enum Message {
 async fn handle_messages(
     thing: Thing,
     message_sender: mpsc::Sender<Message>,
-    mut receiver: mpsc::Receiver<Message>,
+    receiver: mpsc::Receiver<Message>,
 ) {
+    enum Event {
+        Message(Message),
+        Tick,
+        Stop,
+    }
+
     let Thing {
         mut is_on,
         mut level,
@@ -259,28 +272,28 @@ async fn handle_messages(
     let mut actions = Arc::new(actions);
 
     let mut fader = Fader::default();
-    let mut interval = tokio::time::interval(Duration::from_millis(10));
+    let receiver_stream = ReceiverStream::new(receiver)
+        .map(Event::Message)
+        .chain(stream::once(ready(Event::Stop)));
+    let interval_stream =
+        IntervalStream::new(tokio::time::interval(Duration::from_millis(10))).map(|_| Event::Tick);
 
-    loop {
-        select! {
-            message = receiver.recv() => {
-                match message {
-                    Some(message) => handle_message(
-                        message,
-                        &mut is_on,
-                        &mut level,
-                        &mut actions,
-                        &mut fader,
-                        &message_sender,
-                    ).await,
-
-                    None => break,
-                }
+    let mut stream = (receiver_stream, interval_stream).merge();
+    while let Some(event) = stream.next().await {
+        match event {
+            Event::Message(message) => {
+                handle_message(
+                    message,
+                    &mut is_on,
+                    &mut level,
+                    &mut actions,
+                    &mut fader,
+                    &message_sender,
+                )
+                .await
             }
-
-            _ = interval.tick() => {
-                fader.tick(&mut level);
-            }
+            Event::Tick => fader.tick(&mut level),
+            Event::Stop => break,
         }
     }
 }

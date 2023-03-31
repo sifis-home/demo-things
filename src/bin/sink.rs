@@ -1,13 +1,15 @@
 use clap::Parser;
 use demo_things::CliCommon;
+use futures_concurrency::{future::Join, stream::Merge};
+use futures_util::stream;
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, ops::Not, time::Duration};
+use std::{convert::Infallible, future::ready, ops::Not, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use tokio::{
-    join, select,
-    sync::{broadcast, mpsc, oneshot},
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio_stream::{
+    wrappers::{BroadcastStream, IntervalStream, ReceiverStream},
+    Stream, StreamExt,
 };
-use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
     Servient,
@@ -175,10 +177,12 @@ async fn main() {
             .unwrap_or_else(|err| panic!("unable to create web server on address {addr}: {err}"));
     };
 
-    join!(
+    (
         handle_messages(sink, message_receiver, event_sender),
-        axum_future
-    );
+        axum_future,
+    )
+        .join()
+        .await;
 }
 
 #[derive(Clone)]
@@ -270,9 +274,15 @@ enum Event {
 
 async fn handle_messages(
     sink: Sink,
-    mut receiver: mpsc::Receiver<Message>,
+    receiver: mpsc::Receiver<Message>,
     event_sender: broadcast::Sender<Event>,
 ) {
+    enum Event {
+        Message(Message),
+        Tick,
+        Stop,
+    }
+
     let Sink {
         mut is_draining,
         mut flow,
@@ -282,27 +292,34 @@ async fn handle_messages(
         drain_rate,
     } = sink;
 
-    let mut interval = tokio::time::interval(Duration::from_millis(10));
+    let interval_stream =
+        IntervalStream::new(tokio::time::interval(Duration::from_millis(10))).map(|_| Event::Tick);
+    let receiver_stream = ReceiverStream::new(receiver)
+        .map(Event::Message)
+        .chain(stream::once(ready(Event::Stop)));
 
-    loop {
-        select! {
-            message = receiver.recv() => {
-                match message {
-                    Some(message) => handle_message(
-                        message,
-                        &mut is_draining,
-                        &mut flow,
-                        &mut temperature,
-                        level,
-                    ).await,
-
-                    None => break,
-                }
+    let mut event_stream = (receiver_stream, interval_stream).merge();
+    while let Some(event) = event_stream.next().await {
+        match event {
+            Event::Message(message) => {
+                handle_message(
+                    message,
+                    &mut is_draining,
+                    &mut flow,
+                    &mut temperature,
+                    level,
+                )
+                .await
             }
-
-            _ = interval.tick() => {
-                handle_tick(is_draining, flow, fill_rate, drain_rate, &mut level, &event_sender);
-            }
+            Event::Tick => handle_tick(
+                is_draining,
+                flow,
+                fill_rate,
+                drain_rate,
+                &mut level,
+                &event_sender,
+            ),
+            Event::Stop => break,
         }
     }
 }
