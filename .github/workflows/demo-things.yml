@@ -4,36 +4,41 @@ on:
   push:
     branches:
       - master
+    paths:
+      - 'src/**'
+      - '.github/**'
+      - 'Cargo.toml'
   pull_request:
     branches:
       - master
+    paths:
+      - 'src/**'
+      - '.github/**'
+      - 'Cargo.toml'
 
 jobs:
   clippy-rustfmt:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
 
-    - name: Install stable
-      uses: actions-rs/toolchain@v1
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         toolchain: stable
-        override: true
         components: clippy, rustfmt
 
     - name: Run rustfmt
-      uses: actions-rs/cargo@v1
-      with:
-        command: fmt
-        args: -- --check --verbose
+      run:
+        cargo fmt --all -- --check --verbose
 
     - name: Run cargo clippy
-      uses: actions-rs/clippy-check@v1
+      uses: giraffate/clippy-action@v1
       with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        args: --all-targets --tests --benches -- -D warnings
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        clippy_flags: --all-targets -- -D warnings
+        reporter: github-pr-review
 
   build:
     strategy:
@@ -44,14 +49,12 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
 
     - name: Install Rust ${{ matrix.toolchain }}
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         toolchain: ${{ matrix.toolchain }}
-        override: true
 
     - name: Build
       run: cargo build --verbose --tests --benches
@@ -60,4 +63,4 @@ jobs:
       run: cargo test --verbose
 
     - name: Generate docs
-      run: cargo doc --no-deps
+      run: cargo doc --verbose --no-deps
