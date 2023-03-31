@@ -1,6 +1,6 @@
 use futures_util::{FutureExt, Stream};
 use pin_project_lite::pin_project;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use signal_hook_tokio::{Signals, SignalsInfo};
 use tracing::error;
 
@@ -212,6 +212,71 @@ impl<T> ConfigSignalLoaderStreamInner<T> {
                 _ => unreachable!(),
             },
             _ => None,
+        }
+    }
+}
+
+pin_project! {
+    #[derive(
+        Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    )]
+    pub struct OptionStream<T> {
+        #[pin]
+        inner: OptionStreamInner<T>
+    }
+}
+
+pin_project! {
+    #[derive(
+        Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    )]
+    #[project = OptionStreamProj]
+    enum OptionStreamInner<T> {
+        Some {
+            #[pin]
+            inner: T
+        },
+        #[default]
+        None
+    }
+}
+
+impl<T> Stream for OptionStream<T>
+where
+    T: Stream,
+{
+    type Item = T::Item;
+
+    #[inline]
+    fn poll_next(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
+        self.project().inner.poll_next(cx)
+    }
+}
+
+impl<T> Stream for OptionStreamInner<T>
+where
+    T: Stream,
+{
+    type Item = T::Item;
+
+    #[inline]
+    fn poll_next(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+
+        match this {
+            OptionStreamProj::Some { inner } => inner.poll_next(cx),
+            OptionStreamProj::None => Poll::Pending,
+        }
+    }
+}
+
+impl<T> From<Option<T>> for OptionStream<T> {
+    #[inline]
+    fn from(value: Option<T>) -> Self {
+        OptionStream {
+            inner: value.map_or(OptionStreamInner::None, |inner| OptionStreamInner::Some {
+                inner,
+            }),
         }
     }
 }
