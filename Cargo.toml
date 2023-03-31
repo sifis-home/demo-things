@@ -7,6 +7,7 @@ edition = "2021"
 axum = "0.5.6"
 bytes = "1.1.0"
 clap = { version = "4.0.22", features = ["derive"] }
+futures-concurrency = "7.1.0"
 futures-util = "0.3.25"
 http-api-problem = "0.52.0"
 humantime-serde = "1.1.1"

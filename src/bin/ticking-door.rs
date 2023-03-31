@@ -1,17 +1,18 @@
 use clap::Parser;
+use demo_things::config_signal_loader;
 use door::*;
-use futures_util::{pin_mut, StreamExt};
+use futures_concurrency::stream::Merge;
+use futures_util::{stream, StreamExt};
 use http_api_problem::HttpApiProblem;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::SIGHUP;
-use signal_hook_tokio::Signals;
-use std::{net::SocketAddr, path::PathBuf, time::Duration, vec};
+use std::{future, net::SocketAddr, path::PathBuf, pin::pin, time::Duration, vec};
 use tokio::{
-    join, select,
+    join,
     sync::{mpsc, oneshot},
-    time::Sleep,
 };
-use tracing::{error, info};
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::{debug, info};
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
     Servient,
@@ -45,11 +46,6 @@ struct Cli {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct Config {
-    door: DoorConfig,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 struct DoorConfig {
     initial: Door,
     simulation: Vec<DoorSimulation>,
@@ -70,32 +66,30 @@ async fn main() {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     if cli.dump {
-        let config = Config {
-            door: DoorConfig {
-                initial: Door::new(false, LockStatus::Unlocked),
-                simulation: vec![
-                    DoorSimulation {
-                        wait: Duration::from_secs(5),
-                        open: Some(true),
-                        ..Default::default()
-                    },
-                    DoorSimulation {
-                        wait: Duration::from_secs(5),
-                        open: Some(false),
-                        lock: Some(LockStatus::Locked),
-                    },
-                    DoorSimulation {
-                        wait: Duration::from_secs(5),
-                        lock: Some(LockStatus::Jammed),
-                        ..Default::default()
-                    },
-                    DoorSimulation {
-                        wait: Duration::from_secs(5),
-                        open: Some(true),
-                        ..Default::default()
-                    },
-                ],
-            },
+        let config = DoorConfig {
+            initial: Door::new(false, LockStatus::Unlocked),
+            simulation: vec![
+                DoorSimulation {
+                    wait: Duration::from_secs(5),
+                    open: Some(true),
+                    ..Default::default()
+                },
+                DoorSimulation {
+                    wait: Duration::from_secs(5),
+                    open: Some(false),
+                    lock: Some(LockStatus::Locked),
+                },
+                DoorSimulation {
+                    wait: Duration::from_secs(5),
+                    lock: Some(LockStatus::Jammed),
+                    ..Default::default()
+                },
+                DoorSimulation {
+                    wait: Duration::from_secs(5),
+                    open: Some(true),
+                    ..Default::default()
+                },
+            ],
         };
 
         let config = toml::to_vec(&config).unwrap();
@@ -107,14 +101,14 @@ async fn main() {
         return;
     };
 
-    let config: Config = {
+    let config: DoorConfig = {
         let config = std::fs::read(&cli.config).expect("unable to read config file");
         toml::from_slice(&config).expect("unable to parse config file")
     };
 
     let thing = Thing {
-        status: config.door.initial,
-        simulation: config.door.simulation.into_iter(),
+        status: config.initial,
+        simulation: config.simulation.into_iter(),
     };
 
     let (message_sender, message_receiver) = mpsc::channel(MESSAGE_QUEUE_LENGTH);
@@ -191,10 +185,7 @@ async fn main() {
             .unwrap_or_else(|err| panic!("unable to create web server on address {addr}: {err}"));
     };
 
-    join!(
-        handle_messages(thing, message_receiver, message_sender, &cli),
-        axum_future
-    );
+    join!(handle_messages(thing, message_receiver, &cli), axum_future);
 }
 
 #[derive(Clone)]
@@ -248,110 +239,71 @@ enum Message {
     GetLock(oneshot::Sender<LockStatus>),
     Lock(oneshot::Sender<Result<(), DoorError>>),
     Unlock(oneshot::Sender<Result<(), DoorError>>),
-    SetConfig(Config),
 }
 
-async fn handle_messages(
-    thing: Thing,
-    mut receiver: mpsc::Receiver<Message>,
-    sender: mpsc::Sender<Message>,
-    cli: &Cli,
-) {
+async fn handle_messages(thing: Thing, receiver: mpsc::Receiver<Message>, cli: &Cli) {
+    #[derive(Debug)]
+    enum Event {
+        Message(Message),
+        Config(DoorConfig),
+        NextStatus(SimulationStreamItem),
+        Stop,
+    }
+
+    let create_simulation_stream =
+        |simulation| SimulationStream::new(simulation).map(Event::NextStatus);
+
     let Thing {
         mut status,
         simulation,
     } = thing;
 
-    let signals = Signals::new([SIGHUP]).expect("unable to create signal handlers");
-    let signals_handle = signals.handle();
-    let signals_task = tokio::spawn(handle_signals(
-        signals,
-        cli.config.to_owned(),
-        sender.clone(),
-    ));
+    let mut csl = config_signal_loader([SIGHUP], &cli.config);
 
-    let simulation_stream = SimulationStream::new(simulation);
-    pin_mut!(simulation_stream);
-
-    let mut next_status_future = simulation_stream.next();
+    let mut simulation_stream = create_simulation_stream(simulation);
+    let mut receiver_stream = ReceiverStream::new(receiver)
+        .map(Event::Message)
+        .chain(stream::once(future::ready(Event::Stop)));
+    let mut csl_stream = csl.stream.by_ref().map(Event::Config);
 
     'outer: loop {
-        macro_rules! handle_message {
-            ($message:expr) => {{
-                let Some(message) = $message else {
-                                    error!("Messages channel has been closed unexpectedly. Stopping.");
-                                    signals_handle.close();
-                                    if let Err(err) = signals_task.await {
-                                        error!("Error received signals task on joining: {err}");
-                                    }
-                                    break 'outer;
-                                };
+        let mut events_stream =
+            pin!((&mut receiver_stream, &mut csl_stream, simulation_stream).merge());
 
-                if let Some(config) =
-                    handle_message(message, &mut status).await
-                {
+        loop {
+            let Some(event) = events_stream.next().await else {
+                break 'outer;
+            };
+
+            match event {
+                Event::Message(message) => handle_message(message, &mut status).await,
+                Event::Config(config) => {
                     info!("New config obtained. Resetting door statuses to new config.");
 
-                    status = config.door.initial;
-                    simulation_stream.set(SimulationStream::new(config.door.simulation.into_iter()));
-                    next_status_future = simulation_stream.next();
+                    status = config.initial;
+                    simulation_stream = create_simulation_stream(config.simulation.into_iter());
 
-                    continue 'outer;
+                    break;
                 }
-            }};
-        }
+                Event::NextStatus(next_status) => {
+                    debug!("Got next status from simulation: {next_status:#?}");
 
-        loop {
-            select! {
-                message = receiver.recv() => handle_message!(message),
-
-                next_status = &mut next_status_future => {
-                    match next_status {
-                        Some(next_status) => {
-                            if let Some(open) = next_status.open {
-                                status.simulate_open(open);
-                                if open {
-                                    info!("Door is now open");
-                                } else {
-                                    info!("Door is now closed");
-                                }
-                            }
-
-                            if let Some(lock) = next_status.lock {
-                                status.simulate_lock(lock);
-                                info!("Door lock status is {lock}");
-                            }
+                    if let Some(open) = next_status.open {
+                        status.simulate_open(open);
+                        if open {
+                            info!("Door is now open");
+                        } else {
+                            info!("Door is now closed");
                         }
-                        None => break,
+                    }
+
+                    if let Some(lock) = next_status.lock {
+                        status.simulate_lock(lock);
+                        info!("Door lock status is {lock}");
                     }
                 }
+                Event::Stop => break 'outer,
             }
-        }
-
-        loop {
-            handle_message!(receiver.recv().await);
-        }
-    }
-}
-
-async fn handle_signals(mut signals: Signals, config_file: PathBuf, sender: mpsc::Sender<Message>) {
-    while let Some(signal) = signals.next().await {
-        assert_eq!(signal, SIGHUP);
-        let raw_config = match std::fs::read(&config_file) {
-            Ok(config) => config,
-            Err(err) => {
-                error!("unable to read config file: {err}");
-                continue;
-            }
-        };
-
-        match toml::from_slice(&raw_config) {
-            Ok(new_config) => {
-                if sender.send(Message::SetConfig(new_config)).await.is_err() {
-                    error!("unable to send new config through channel: channel is closed.");
-                }
-            }
-            Err(err) => error!("unable to parse config file: {err}"),
         }
     }
 }
@@ -366,6 +318,7 @@ mod door {
 
     use futures_util::{stream::FusedStream, Stream};
     use pin_project_lite::pin_project;
+    use tokio::time::Sleep;
 
     use super::*;
 
@@ -602,27 +555,14 @@ mod door {
     }
 }
 
-async fn handle_message(message: Message, status: &mut Door) -> Option<Config> {
+async fn handle_message(message: Message, status: &mut Door) {
     use Message::*;
 
     match message {
-        GetOpen(sender) => {
-            sender.send(status.is_open()).unwrap();
-            None
-        }
-        GetLock(sender) => {
-            sender.send(status.lock()).unwrap();
-            None
-        }
-        Lock(sender) => {
-            sender.send(status.do_lock().map(|_| ())).unwrap();
-            None
-        }
-        Unlock(sender) => {
-            sender.send(status.do_unlock().map(|_| ())).unwrap();
-            None
-        }
-        SetConfig(new_config) => Some(new_config),
+        GetOpen(sender) => sender.send(status.is_open()).unwrap(),
+        GetLock(sender) => sender.send(status.lock()).unwrap(),
+        Lock(sender) => sender.send(status.do_lock().map(|_| ())).unwrap(),
+        Unlock(sender) => sender.send(status.do_unlock().map(|_| ())).unwrap(),
     }
 }
 
