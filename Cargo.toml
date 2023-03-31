@@ -20,7 +20,7 @@ signal-hook = { version = "0.3.14", default-features = false }
 signal-hook-tokio = { version = "0.3.1", features = ["futures-v0_3"] }
 time = { version = "0.3.9", features = ["serde", "serde-well-known"] }
 tokio = { version = "1.18.2", features = ["macros", "time", "fs"] }
-tokio-stream = { version = "0.1.9", features = ["sync"] }
+tokio-stream = { version = "0.1.9", features = ["sync", "time"] }
 toml = "0.5.10"
 tower-http = { version = "0.4.0", features = ["cors"] }
 tracing = "0.1.34"
