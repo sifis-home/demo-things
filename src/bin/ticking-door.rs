@@ -1,16 +1,13 @@
 use clap::Parser;
 use demo_things::{config_signal_loader, CliCommon, SimulationStream};
 use door::*;
-use futures_concurrency::stream::Merge;
+use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
 use http_api_problem::HttpApiProblem;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::SIGHUP;
 use std::{future, path::PathBuf, pin::pin, time::Duration, vec};
-use tokio::{
-    join,
-    sync::{mpsc, oneshot},
-};
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info};
 use wot_serve::{
@@ -189,7 +186,9 @@ async fn main() {
             .unwrap_or_else(|err| panic!("unable to create web server on address {addr}: {err}"));
     };
 
-    join!(handle_messages(thing, message_receiver, &cli), axum_future);
+    (handle_messages(thing, message_receiver, &cli), axum_future)
+        .join()
+        .await;
 }
 
 #[derive(Clone)]

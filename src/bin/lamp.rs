@@ -1,15 +1,19 @@
+use futures_concurrency::{future::Join, stream::Merge};
+use futures_util::stream;
 use http_api_problem::HttpApiProblem;
 
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
-use std::{collections::HashMap, ops::Not, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::ready, ops::Not, sync::Arc, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::{
-    join, select,
     sync::{broadcast, mpsc, oneshot},
     time::sleep,
 };
-use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
+use tokio_stream::{
+    wrappers::{BroadcastStream, IntervalStream, ReceiverStream},
+    Stream, StreamExt,
+};
 use tower_http::cors::CorsLayer;
 use tracing::warn;
 use uuid::Uuid;
@@ -199,10 +203,12 @@ async fn main() {
             .unwrap_or_else(|err| panic!("unable to create web server on address {addr}: {err}"));
     };
 
-    join!(
+    (
         handle_messages(lamp, message_sender, message_receiver, event_sender),
-        axum_future
-    );
+        axum_future,
+    )
+        .join()
+        .await;
 }
 
 #[derive(Clone)]
@@ -327,9 +333,15 @@ enum Event {
 async fn handle_messages(
     lamp: Lamp,
     message_sender: mpsc::Sender<Message>,
-    mut receiver: mpsc::Receiver<Message>,
+    receiver: mpsc::Receiver<Message>,
     event_sender: broadcast::Sender<Event>,
 ) {
+    enum Event {
+        Message(Message),
+        Tick,
+        Stop,
+    }
+
     let Lamp {
         mut is_on,
         mut brightness,
@@ -338,30 +350,36 @@ async fn handle_messages(
     } = lamp;
     let mut actions = Arc::new(actions);
 
-    let mut interval = tokio::time::interval(Duration::from_millis(10));
+    let receiver_stream = ReceiverStream::new(receiver)
+        .map(Event::Message)
+        .chain(stream::once(ready(Event::Stop)));
+    let interval_stream =
+        IntervalStream::new(tokio::time::interval(Duration::from_millis(10))).map(|_| Event::Tick);
     let mut fader = Fader::default();
 
-    loop {
-        select! {
-            message = receiver.recv() => {
-                match message {
-                    Some(message) => handle_message(
-                        message,
-                        &mut is_on,
-                        &mut brightness,
-                        &mut actions,
-                        &mut fader,
-                        &message_sender,
-                        &event_sender
-                    ).await,
-
-                    None => break,
-                }
+    let mut stream = (receiver_stream, interval_stream).merge();
+    while let Some(event) = stream.next().await {
+        match event {
+            Event::Message(message) => {
+                handle_message(
+                    message,
+                    &mut is_on,
+                    &mut brightness,
+                    &mut actions,
+                    &mut fader,
+                    &message_sender,
+                    &event_sender,
+                )
+                .await
             }
-
-            _ = interval.tick() => {
-                handle_tick(is_on, &mut brightness, &mut temperature, &mut fader, &event_sender);
-            }
+            Event::Tick => handle_tick(
+                is_on,
+                &mut brightness,
+                &mut temperature,
+                &mut fader,
+                &event_sender,
+            ),
+            Event::Stop => break,
         }
     }
 }

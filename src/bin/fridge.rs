@@ -11,10 +11,7 @@ use futures_concurrency::prelude::*;
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::SIGHUP;
-use tokio::{
-    join,
-    sync::{mpsc, oneshot},
-};
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tracing::{debug, info, trace};
 use wot_serve::{
@@ -214,7 +211,9 @@ async fn main() {
             .unwrap_or_else(|err| panic!("unable to create web server on address {addr}: {err}"));
     };
 
-    join!(handle_messages(fridge, message_receiver, &cli), axum_future);
+    (handle_messages(fridge, message_receiver, &cli), axum_future)
+        .join()
+        .await;
 }
 
 #[derive(Clone)]

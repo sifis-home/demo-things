@@ -1,11 +1,9 @@
 use clap::Parser;
 use demo_things::CliCommon;
+use futures_concurrency::future::Join;
 use serde::{Deserialize, Serialize};
 use std::ops::Not;
-use tokio::{
-    join,
-    sync::{mpsc, oneshot},
-};
+use tokio::sync::{mpsc, oneshot};
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
     Servient,
@@ -98,7 +96,9 @@ async fn main() {
             .unwrap_or_else(|err| panic!("unable to create web server on address {addr}: {err}"));
     };
 
-    join!(handle_messages(thing, message_receiver), axum_future);
+    (handle_messages(thing, message_receiver), axum_future)
+        .join()
+        .await;
 }
 
 #[derive(Clone)]
