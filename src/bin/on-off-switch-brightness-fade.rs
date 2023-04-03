@@ -12,6 +12,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
@@ -130,7 +131,11 @@ async fn main() {
         .build_servient()
         .expect("cannot build Thing Descriptor for the on-off switch");
 
-    servient.router = servient.router.layer(Extension(app_state));
+    let cors = CorsLayer::new()
+        .allow_methods(tower_http::cors::Any)
+        .allow_origin(tower_http::cors::Any);
+
+    servient.router = servient.router.layer(Extension(app_state)).layer(cors);
 
     let axum_future = async {
         tracing::debug!("listening on {}", addr);
