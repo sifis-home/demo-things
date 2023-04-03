@@ -10,6 +10,7 @@ use tokio_stream::{
     wrappers::{BroadcastStream, IntervalStream, ReceiverStream},
     Stream, StreamExt,
 };
+use tower_http::cors::CorsLayer;
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
     Servient,
@@ -167,7 +168,11 @@ async fn main() {
         .build_servient()
         .expect("cannot build Thing Descriptor for the sink");
 
-    servient.router = servient.router.layer(Extension(app_state));
+    let cors = CorsLayer::new()
+        .allow_methods(tower_http::cors::Any)
+        .allow_origin(tower_http::cors::Any);
+
+    servient.router = servient.router.layer(Extension(app_state)).layer(cors);
 
     let axum_future = async {
         tracing::debug!("listening on {}", addr);

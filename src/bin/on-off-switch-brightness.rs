@@ -3,6 +3,7 @@ use demo_things::CliCommon;
 use futures_concurrency::future::Join;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
+use tower_http::cors::CorsLayer;
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
     Servient,
@@ -95,7 +96,11 @@ async fn main() {
         .build_servient()
         .expect("cannot build Thing Descriptor for the on-off switch with brightness");
 
-    servient.router = servient.router.layer(Extension(app_state));
+    let cors = CorsLayer::new()
+        .allow_methods(tower_http::cors::Any)
+        .allow_origin(tower_http::cors::Any);
+
+    servient.router = servient.router.layer(Extension(app_state)).layer(cors);
 
     let axum_future = async {
         tracing::debug!("listening on {}", addr);

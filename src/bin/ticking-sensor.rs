@@ -7,6 +7,7 @@ use signal_hook::consts::SIGHUP;
 use std::{future, ops::Not, path::PathBuf, time::Duration, vec};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
+use tower_http::cors::CorsLayer;
 use tracing::{info, instrument, trace, warn};
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
@@ -169,7 +170,11 @@ async fn main() {
         .build_servient()
         .expect("cannot build Thing Descriptor for the ticking sensor");
 
-    servient.router = servient.router.layer(Extension(app_state));
+    let cors = CorsLayer::new()
+        .allow_methods(tower_http::cors::Any)
+        .allow_origin(tower_http::cors::Any);
+
+    servient.router = servient.router.layer(Extension(app_state)).layer(cors);
 
     let axum_future = async {
         tracing::debug!("listening on {}", addr);
