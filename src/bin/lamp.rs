@@ -34,7 +34,7 @@ use wot_td::builder::{
 };
 
 use clap::Parser;
-use demo_things::CliCommon;
+use demo_things::{CliCommon, ThingBuilderExt};
 
 struct Lamp {
     is_on: bool,
@@ -72,6 +72,7 @@ async fn main() {
         .id("urn:dev:ops:my-lamp-1234")
         .attype("OnOffSwitch")
         .attype("Light")
+        .base_from_cli(&cli)
         .description("A web connected lamp")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .form(|b| {

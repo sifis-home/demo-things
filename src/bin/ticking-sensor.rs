@@ -1,5 +1,5 @@
 use clap::Parser;
-use demo_things::{config_signal_loader, CliCommon, OptionStream};
+use demo_things::{config_signal_loader, CliCommon, OptionStream, ThingBuilderExt};
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -135,6 +135,7 @@ async fn main() {
         .attype("TemperatureSensor")
         .attype("HumiditySensor");
     let mut servient = thing_builder
+        .base_from_cli(&cli.common)
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .property("temperature", |b| {
             b.finish_extend_data_schema()
