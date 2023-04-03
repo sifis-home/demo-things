@@ -1,5 +1,5 @@
 use clap::Parser;
-use demo_things::{config_signal_loader, CliCommon, SimulationStream};
+use demo_things::{config_signal_loader, CliCommon, SimulationStream, ThingBuilderExt};
 use door::*;
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
@@ -126,6 +126,7 @@ async fn main() {
         .attype("DoorSensor")
         .attype("Lock");
     let mut servient = thing_builder
+        .base_from_cli(&cli.common)
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .property("open", |b| {
             b.finish_extend_data_schema()

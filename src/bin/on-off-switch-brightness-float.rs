@@ -1,5 +1,5 @@
 use clap::Parser;
-use demo_things::CliCommon;
+use demo_things::{CliCommon, ThingBuilderExt};
 use futures_concurrency::future::Join;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
@@ -61,6 +61,7 @@ async fn main() {
         thing_builder = thing_builder.attype("Light");
     }
     let mut servient = thing_builder
+        .base_from_cli(&cli.common)
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .property("on", |b| {
             b.finish_extend_data_schema()

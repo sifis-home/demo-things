@@ -7,6 +7,7 @@ use pin_project_lite::pin_project;
 use serde::{Deserialize, Serialize};
 use signal_hook_tokio::{Signals, SignalsInfo};
 use tracing::error;
+use wot_td::{builder::ThingBuilder, extend::ExtendableThing};
 
 use std::{
     borrow::Borrow,
@@ -46,6 +47,12 @@ pub struct CliCommon {
         global = true,
     )]
     pub verbose: u8,
+
+    /// The name of the host.
+    ///
+    /// When provided, it is used to create the `base` field inside the WoT description.
+    #[arg(long)]
+    pub host: Option<String>,
 }
 
 impl CliCommon {
@@ -66,6 +73,39 @@ impl CliCommon {
 
     pub fn socket_addr(&self) -> SocketAddr {
         SocketAddr::from((self.bind_addr, self.listen_port))
+    }
+
+    pub fn set_thing_base<O: ExtendableThing, S>(
+        &self,
+        thing_builder: ThingBuilder<O, S>,
+    ) -> ThingBuilder<O, S> {
+        use std::fmt::Write;
+
+        match &self.host {
+            Some(host) => {
+                let mut base = format!("http://{host}");
+                if self.listen_port != 80 {
+                    write!(base, ":{}", self.listen_port).unwrap();
+                }
+                base.push('/');
+                thing_builder.base(base)
+            }
+            None => thing_builder,
+        }
+    }
+}
+
+pub trait ThingBuilderExt {
+    fn base_from_cli(self, cli: &CliCommon) -> Self;
+}
+
+impl<Other, Status> ThingBuilderExt for ThingBuilder<Other, Status>
+where
+    Other: ExtendableThing,
+{
+    #[inline]
+    fn base_from_cli(self, cli: &CliCommon) -> Self {
+        cli.set_thing_base(self)
     }
 }
 

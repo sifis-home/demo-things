@@ -6,7 +6,7 @@ use axum::{
     Extension,
 };
 use clap::Parser;
-use demo_things::{config_signal_loader, CliCommon, Simulation, SimulationStream};
+use demo_things::{config_signal_loader, CliCommon, Simulation, SimulationStream, ThingBuilderExt};
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -148,6 +148,7 @@ async fn main() {
         .id("urn:dev:ops:my-fridge-1234")
         .attype("DoorSensor")
         .attype("Thermostat")
+        .base_from_cli(&cli.common)
         .description("A web connected fridge")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .form(|b| {

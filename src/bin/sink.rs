@@ -1,5 +1,5 @@
 use clap::Parser;
-use demo_things::CliCommon;
+use demo_things::{CliCommon, ThingBuilderExt};
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,7 @@ async fn main() {
         .finish_extend()
         .id("urn:dev:ops:my-sink-1234")
         .attype("OnOffSwitch")
+        .base_from_cli(&cli.common)
         .description("A web connected sink")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .form(|b| {
