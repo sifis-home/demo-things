@@ -1,10 +1,10 @@
 use clap::Parser;
-use demo_things::{config_signal_loader, OptionStream};
+use demo_things::{config_signal_loader, CliCommon, OptionStream};
 use futures_concurrency::stream::Merge;
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::SIGHUP;
-use std::{future, net::SocketAddr, ops::Not, path::PathBuf, time::Duration, vec};
+use std::{future, ops::Not, path::PathBuf, time::Duration, vec};
 use tokio::{
     join,
     sync::{mpsc, oneshot},
@@ -32,6 +32,9 @@ const TICK_DURATION: Duration = Duration::from_millis(10);
 
 #[derive(Parser)]
 struct Cli {
+    #[clap(flatten)]
+    common: CliCommon,
+
     /// The config TOML file for the ticking sensor.
     config: PathBuf,
 
@@ -61,8 +64,9 @@ struct SensorVariation {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    cli.common.setup_tracing();
+
     if cli.dump {
         let config = Config {
             humidity: SensorConfig {
@@ -126,7 +130,7 @@ async fn main() {
         message_sender: message_sender.clone(),
     };
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = cli.common.socket_addr();
     let thing_builder = Servient::builder("Ticking Sensor")
         .finish_extend()
         .id("urn:dev:ops:ticking-sensor-1234")

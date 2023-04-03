@@ -1,12 +1,12 @@
 use clap::Parser;
-use demo_things::{config_signal_loader, SimulationStream};
+use demo_things::{config_signal_loader, CliCommon, SimulationStream};
 use door::*;
 use futures_concurrency::stream::Merge;
 use futures_util::{stream, StreamExt};
 use http_api_problem::HttpApiProblem;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::SIGHUP;
-use std::{future, net::SocketAddr, path::PathBuf, pin::pin, time::Duration, vec};
+use std::{future, path::PathBuf, pin::pin, time::Duration, vec};
 use tokio::{
     join,
     sync::{mpsc, oneshot},
@@ -37,6 +37,9 @@ const MESSAGE_QUEUE_LENGTH: usize = 16;
 
 #[derive(Parser)]
 struct Cli {
+    #[clap(flatten)]
+    common: CliCommon,
+
     /// The config TOML file for the ticking door.
     config: PathBuf,
 
@@ -63,8 +66,9 @@ struct DoorSimulation {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    cli.common.setup_tracing();
+
     if cli.dump {
         let config = DoorConfig {
             initial: Door::new(false, LockStatus::Unlocked),
@@ -117,7 +121,7 @@ async fn main() {
         message_sender: message_sender.clone(),
     };
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = cli.common.socket_addr();
     let thing_builder = Servient::builder("Ticking Door")
         .finish_extend()
         .id("urn:dev:ops:ticking-door-1234")

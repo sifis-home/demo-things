@@ -1,6 +1,7 @@
 use clap::Parser;
+use demo_things::CliCommon;
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, net::SocketAddr, ops::Not, time::Duration};
+use std::{convert::Infallible, ops::Not, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::{
     join, select,
@@ -35,6 +36,9 @@ const MESSAGE_QUEUE_LENGTH: usize = 16;
 
 #[derive(Parser)]
 struct Cli {
+    #[clap(flatten)]
+    common: CliCommon,
+
     /// The fill rate.
     #[clap(short, long, default_value_t = 1.)]
     fill: f32,
@@ -46,8 +50,8 @@ struct Cli {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    cli.common.setup_tracing();
 
     let sink = Sink {
         is_draining: true,
@@ -66,7 +70,7 @@ async fn main() {
         event_sender: event_sender.clone(),
     };
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = cli.common.socket_addr();
     let mut servient = Servient::builder("My Sink")
         .finish_extend()
         .id("urn:dev:ops:my-sink-1234")
