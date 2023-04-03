@@ -1,6 +1,7 @@
 use clap::Parser;
+use demo_things::CliCommon;
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, ops::Not};
+use std::ops::Not;
 use tokio::{
     join,
     sync::{mpsc, oneshot},
@@ -27,6 +28,9 @@ const MESSAGE_QUEUE_LENGTH: usize = 16;
 
 #[derive(Parser)]
 struct Cli {
+    #[clap(flatten)]
+    common: CliCommon,
+
     /// Add the Light @type to the switch
     #[clap(short, long)]
     light: bool,
@@ -34,8 +38,8 @@ struct Cli {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    cli.common.setup_tracing();
 
     let thing = Thing { is_on: true };
 
@@ -45,7 +49,7 @@ async fn main() {
         message_sender: message_sender.clone(),
     };
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = cli.common.socket_addr();
     let mut thing_builder = Servient::builder("On-Off Switch")
         .finish_extend()
         .id("urn:dev:ops:on-off-1234")

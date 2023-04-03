@@ -82,6 +82,7 @@ pub struct Cli {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
+    cli.common.setup_tracing();
 
     if cli.dump {
         let config = FridgeConfig {
@@ -124,8 +125,6 @@ async fn main() {
         );
         return;
     };
-
-    cli.common.setup_tracing();
 
     let fridge: FridgeConfig = {
         let config = std::fs::read(&cli.config).expect("unable to read config file");
