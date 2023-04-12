@@ -9,7 +9,7 @@
 - [x] Ticking Sensor
 - [ ] Cooker
 - [ ] Oven
-- [ ] Fridge
+- [x] Fridge
 
 ## Supported platforms
 
