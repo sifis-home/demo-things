@@ -7,7 +7,7 @@ use axum::{
 };
 use clap::Parser;
 use demo_things::{config_signal_loader, CliCommon, Simulation, SimulationStream};
-use futures_concurrency::prelude::*;
+use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::SIGHUP;
