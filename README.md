@@ -8,7 +8,7 @@
 - [x] Ticking Door
 - [x] Ticking Sensor
 - [ ] Cooker
-- [ ] Oven
+- [x] Oven
 - [x] Fridge
 
 ## Supported platforms
@@ -34,6 +34,7 @@ where `<demo_name>` can be one of the following:
 - on-off-switch-fade
 - on-off-switch
 - on-off-switch-toggle
+- oven
 - sink
 - ticking-door
 - ticking-sensor
