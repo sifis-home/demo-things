@@ -558,16 +558,16 @@ async fn get_on_property(Extension(app): Extension<AppState>) -> Json<bool> {
 }
 
 async fn put_target_temperature_property(
-    Json(value): Json<u8>,
     Extension(app): Extension<AppState>,
+    Json(value): Json<u8>,
 ) -> impl IntoResponse {
     app.set_target_temperature(value).await;
     StatusCode::NO_CONTENT
 }
 
 async fn put_on_property(
-    Json(value): Json<bool>,
     Extension(app): Extension<AppState>,
+    Json(value): Json<bool>,
 ) -> impl IntoResponse {
     app.set_is_on(value).await;
     StatusCode::NO_CONTENT

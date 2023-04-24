@@ -464,8 +464,8 @@ async fn get_drain_property(Extension(app): Extension<AppState>) -> Json<bool> {
 }
 
 async fn put_drain_property(
-    Json(value): Json<bool>,
     Extension(app): Extension<AppState>,
+    Json(value): Json<bool>,
 ) -> impl IntoResponse {
     app.set_drain(value).await;
     StatusCode::NO_CONTENT
@@ -477,8 +477,8 @@ async fn get_flow_property(Extension(app): Extension<AppState>) -> Json<u8> {
 }
 
 async fn put_flow_property(
-    Json(value): Json<u8>,
     Extension(app): Extension<AppState>,
+    Json(value): Json<u8>,
 ) -> impl IntoResponse {
     if value > 100 {
         return StatusCode::BAD_REQUEST;
@@ -494,8 +494,8 @@ async fn get_temperature_property(Extension(app): Extension<AppState>) -> Json<u
 }
 
 async fn put_temperature_property(
-    Json(value): Json<u8>,
     Extension(app): Extension<AppState>,
+    Json(value): Json<u8>,
 ) -> impl IntoResponse {
     if (10..=80).contains(&value).not() {
         return StatusCode::BAD_REQUEST;

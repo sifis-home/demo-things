@@ -411,8 +411,8 @@ async fn get_on_property(Extension(app): Extension<AppState>) -> Json<bool> {
 }
 
 async fn put_on_property(
-    Json(value): Json<bool>,
     Extension(app): Extension<AppState>,
+    Json(value): Json<bool>,
 ) -> impl IntoResponse {
     app.set_is_on(value).await;
     StatusCode::NO_CONTENT
@@ -426,8 +426,8 @@ struct FadeActionInput {
 }
 
 async fn post_fade_action(
-    Json(input): Json<FadeActionInput>,
     Extension(state): Extension<AppState>,
+    Json(input): Json<FadeActionInput>,
 ) -> impl IntoResponse {
     let action = state.fade(input).await;
     let (output, href) = action.ty.into_output_href().unwrap();
