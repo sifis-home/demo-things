@@ -508,8 +508,8 @@ async fn get_target_temperature_property(Extension(app): Extension<AppState>) ->
 }
 
 async fn put_target_temperature_property(
-    Json(value): Json<i8>,
     Extension(app): Extension<AppState>,
+    Json(value): Json<i8>,
 ) -> impl IntoResponse {
     app.set_target_temperature(value).await;
     StatusCode::NO_CONTENT
