@@ -10,6 +10,7 @@ use demo_things::{config_signal_loader, CliCommon, Simulation, SimulationStream,
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use sifis_td::Sifis;
 use signal_hook::consts::SIGHUP;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
@@ -146,6 +147,7 @@ async fn main() {
 
     let addr = cli.common.socket_addr();
     let mut servient = Servient::builder("My Oven")
+        .ext(create_sifis())
         .finish_extend()
         .id("urn:dev:ops:my-oven-1234")
         .attype("DoorSensor")
@@ -155,18 +157,23 @@ async fn main() {
         .description("A web connected oven")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .form(|b| {
-            b.href("/properties")
+            b.ext(())
+                .href("/properties")
                 .http_get(properties)
                 .content_type("application/json")
                 .op(wot_td::thing::FormOperation::ReadAllProperties)
         })
         .property("on", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .attype("OnOffProperty")
                 .title("On/Off")
                 .description("Whether the oven is turned on")
                 .form(|b| {
-                    b.href("/properties/on")
+                    b.ext(())
+                        .href("/properties/on")
                         .http_get(get_on_property)
                         .http_put(put_on_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
@@ -175,12 +182,16 @@ async fn main() {
                 .bool()
         })
         .property("door", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .attype("OpenProperty")
                 .title("Open door")
                 .description("Whether the door of the oven is open or closed")
                 .form(|b| {
-                    b.href("/properties/door")
+                    b.ext(())
+                        .href("/properties/door")
                         .http_get(get_door_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
                 })
@@ -188,12 +199,16 @@ async fn main() {
                 .read_only()
         })
         .property("temperature", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .attype("TemperatureProperty")
                 .title("Temperature")
                 .description("The temperature")
                 .form(|b| {
-                    b.href("/properties/temperature")
+                    b.ext(())
+                        .href("/properties/temperature")
                         .http_get(get_temperature_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
                 })
@@ -202,12 +217,16 @@ async fn main() {
                 .read_only()
         })
         .property("target_temperature", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .attype("TargetTemperatureProperty")
                 .title("Target temperature")
                 .description("The target temperature")
                 .form(|b| {
-                    b.href("/properties/target-temperature")
+                    b.ext(())
+                        .href("/properties/target-temperature")
                         .http_get(get_target_temperature_property)
                         .http_put(put_target_temperature_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
@@ -571,4 +590,73 @@ async fn put_on_property(
 ) -> impl IntoResponse {
     app.set_is_on(value).await;
     StatusCode::NO_CONTENT
+}
+
+fn create_sifis() -> Sifis {
+    Sifis::builder()
+        .fire_hazard(3, |cond| {
+            cond.when("/properties/on")
+                .eq(true)
+                .and("/properties/temperature")
+                .ge(80)
+        })
+        .asphyxia(2, |cond| cond.when("/properties/temperature").ge(200))
+        .burn(1, |cond| {
+            cond.when("/properties/temperature")
+                .ge(60)
+                .and("/properties/door")
+                .eq(true)
+                .or(|cond| {
+                    cond.when("/properties/temperature")
+                        .ge(90)
+                        .and("/properties/door")
+                        .eq(false)
+                })
+        })
+        .burn(4, |cond| {
+            cond.when("/properties/temperature")
+                .ge(100)
+                .and("/properties/door")
+                .eq(true)
+                .or(|cond| {
+                    cond.when("/properties/temperature")
+                        .ge(180)
+                        .and("/properties/door")
+                        .eq(false)
+                })
+        })
+        .burn(8, |cond| {
+            cond.when("/properties/temperature")
+                .ge(160)
+                .and("/properties/door")
+                .eq(true)
+                .or(|cond| {
+                    cond.when("/properties/temperature")
+                        .ge(240)
+                        .and("/properties/door")
+                        .eq(false)
+                })
+        })
+        .scald(3, |cond| cond.when("/properties/temperature").ge(100))
+        .scald(5, |cond| cond.when("/properties/temperature").ge(180))
+        .scald(8, |cond| cond.when("/properties/temperature").ge(220))
+        .electric_energy_consumption(6, |cond| {
+            cond.when("/properties/temperature")
+                .ge(100)
+                .and("/properties/on")
+                .eq(true)
+        })
+        .electric_energy_consumption(7, |cond| {
+            cond.when("/properties/temperature")
+                .ge(180)
+                .and("/properties/on")
+                .eq(true)
+        })
+        .electric_energy_consumption(8, |cond| {
+            cond.when("/properties/temperature")
+                .ge(220)
+                .and("/properties/on")
+                .eq(true)
+        })
+        .build()
 }
