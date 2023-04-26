@@ -31,7 +31,7 @@ struct Cli {
     common: CliCommon,
 
     /// Add the Light @type to the switch
-    #[clap(short, long)]
+    #[clap(long)]
     light: bool,
 }
 
