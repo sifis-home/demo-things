@@ -10,6 +10,7 @@ use demo_things::{config_signal_loader, CliCommon, Simulation, SimulationStream,
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use sifis_td::Sifis;
 use signal_hook::consts::SIGHUP;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
@@ -144,6 +145,7 @@ async fn main() {
 
     let addr = cli.common.socket_addr();
     let mut servient = Servient::builder("My Fridge")
+        .ext(create_sifis())
         .finish_extend()
         .id("urn:dev:ops:my-fridge-1234")
         .attype("DoorSensor")
@@ -152,18 +154,23 @@ async fn main() {
         .description("A web connected fridge")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .form(|b| {
-            b.href("/properties")
+            b.ext(())
+                .href("/properties")
                 .http_get(properties)
                 .content_type("application/json")
                 .op(wot_td::thing::FormOperation::ReadAllProperties)
         })
         .property("door", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .attype("OpenProperty")
                 .title("Open door")
                 .description("Whether the door of the fridge is open or closed")
                 .form(|b| {
-                    b.href("/properties/door")
+                    b.ext(())
+                        .href("/properties/door")
                         .http_get(get_door_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
                 })
@@ -171,12 +178,16 @@ async fn main() {
                 .read_only()
         })
         .property("temperature", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .attype("TemperatureProperty")
                 .title("Temperature")
                 .description("The temperature")
                 .form(|b| {
-                    b.href("/properties/temperature")
+                    b.ext(())
+                        .href("/properties/temperature")
                         .http_get(get_temperature_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
                 })
@@ -185,12 +196,16 @@ async fn main() {
                 .read_only()
         })
         .property("target_temperature", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .attype("TargetTemperatureProperty")
                 .title("Target temperature")
                 .description("The target temperature")
                 .form(|b| {
-                    b.href("/properties/target-temperature")
+                    b.ext(())
+                        .href("/properties/target-temperature")
                         .http_get(get_target_temperature_property)
                         .http_put(put_target_temperature_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
@@ -513,4 +528,17 @@ async fn put_target_temperature_property(
 ) -> impl IntoResponse {
     app.set_target_temperature(value).await;
     StatusCode::NO_CONTENT
+}
+
+fn create_sifis() -> Sifis {
+    Sifis::builder()
+        .spoiled_food(3, |cond| cond)
+        .spoiled_food(5, |cond| cond.when("/properties/temperature").ge(8))
+        .spoiled_food(8, |cond| {
+            cond.when("/properties/temperature")
+                .ge(16)
+                .or(|cond| cond.when("/properties/door").eq(true))
+        })
+        .electric_energy_consumption(3, |cond| cond)
+        .build()
 }
