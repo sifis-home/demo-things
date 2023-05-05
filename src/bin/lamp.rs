@@ -4,6 +4,7 @@ use http_api_problem::HttpApiProblem;
 
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
+use sifis_td::Sifis;
 use std::{collections::HashMap, future::ready, ops::Not, sync::Arc, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::{
@@ -68,6 +69,7 @@ async fn main() {
 
     let addr = cli.socket_addr();
     let mut servient = Servient::builder("My Lamp")
+        .ext(create_sifis())
         .finish_extend()
         .id("urn:dev:ops:my-lamp-1234")
         .attype("OnOffSwitch")
@@ -76,38 +78,46 @@ async fn main() {
         .description("A web connected lamp")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .form(|b| {
-            b.href("/properties")
+            b.ext(())
+                .href("/properties")
                 .http_get(properties)
                 .content_type("application/json")
                 .op(wot_td::thing::FormOperation::ReadAllProperties)
         })
         .form(|b| {
-            b.href("/properties/observe")
+            b.ext(())
+                .href("/properties/observe")
                 .http_get(observe_properties)
                 .op(wot_td::thing::FormOperation::ObserveAllProperties)
                 .op(wot_td::thing::FormOperation::UnobserveAllProperties)
                 .subprotocol("sse")
         })
         .form(|b| {
-            b.href("/actions")
+            b.ext(())
+                .href("/actions")
                 .http_get(get_actions)
                 .content_type("application/json")
                 .op(wot_td::thing::FormOperation::QueryAllActions)
         })
         .form(|b| {
-            b.href("/events")
+            b.ext(())
+                .href("/events")
                 .http_get(all_events)
                 .op(wot_td::thing::FormOperation::SubscribeAllEvents)
                 .op(wot_td::thing::FormOperation::UnsubscribeAllEvents)
                 .subprotocol("sse")
         })
         .property("on", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .attype("OnOffProperty")
                 .title("On/Off")
                 .description("Whether the lamp is turned on")
                 .form(|b| {
-                    b.href("/properties/on")
+                    b.ext(())
+                        .href("/properties/on")
                         .http_get(get_on_property)
                         .http_put(put_on_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
@@ -116,19 +126,24 @@ async fn main() {
                 .bool()
         })
         .property("brightness", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .attype("BrightnessProperty")
                 .title("Brightness")
                 .description("The level of light from 0-100")
                 .form(|b| {
-                    b.href("/properties/brightness")
+                    b.ext(())
+                        .href("/properties/brightness")
                         .http_get(get_brightness_property)
                         .http_put(put_brightness_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
                         .op(wot_td::thing::FormOperation::WriteProperty)
                 })
                 .form(|b| {
-                    b.href("/properties/brightness/observe")
+                    b.ext(())
+                        .href("/properties/brightness/observe")
                         .http_get(observe_brightness)
                         .op(wot_td::thing::FormOperation::ObserveProperty)
                         .op(wot_td::thing::FormOperation::UnobserveProperty)
@@ -141,50 +156,64 @@ async fn main() {
                 .unit("percent")
         })
         .action("fade", |b| {
-            b.title("Fade")
+            b.ext(())
+                .ext_interaction(())
+                .title("Fade")
                 .description("Fade the lamp to a given level")
                 .form(|b| {
-                    b.href("/actions/fade")
+                    b.ext(())
+                        .href("/actions/fade")
                         .http_post(post_fade_action)
                         .op(wot_td::thing::FormOperation::InvokeAction)
                 })
                 .form(|b| {
-                    b.href("/actions/fade/{action_id}")
+                    b.ext(())
+                        .href("/actions/fade/{action_id}")
                         .http_get(get_fade_action)
                         .op(wot_td::thing::FormOperation::QueryAction)
                         .http_delete(delete_fade_action)
                         .op(wot_td::thing::FormOperation::CancelAction)
                 })
                 .uri_variable("action_id", |b| {
-                    b.finish_extend()
+                    b.ext(())
+                        .finish_extend()
                         .description("Identifier of the ongoing action")
                         .string()
                 })
                 .input(|b| {
-                    b.finish_extend()
+                    b.ext(())
+                        .finish_extend()
                         .object()
                         .property("brightness", true, |b| {
-                            b.finish_extend()
+                            b.ext(())
+                                .finish_extend()
                                 .integer()
                                 .minimum(0)
                                 .maximum(100)
                                 .unit("percent")
                         })
                         .property("duration", true, |b| {
-                            b.finish_extend().integer().minimum(1).unit("milliseconds")
+                            b.ext(())
+                                .finish_extend()
+                                .integer()
+                                .minimum(1)
+                                .unit("milliseconds")
                         })
                 })
         })
         .event("overheated", |b| {
-            b.description("The lamp has exceeded its safe operating temperature")
+            b.ext(())
+                .ext_interaction(())
+                .description("The lamp has exceeded its safe operating temperature")
                 .form(|b| {
-                    b.href("/events/overheated")
+                    b.ext(())
+                        .href("/events/overheated")
                         .http_get(overheated_events)
                         .op(wot_td::thing::FormOperation::SubscribeEvent)
                         .op(wot_td::thing::FormOperation::UnsubscribeEvent)
                         .subprotocol("sse")
                 })
-                .data(|b| b.finish_extend().number().unit("degree celsius"))
+                .data(|b| b.ext(()).finish_extend().number().unit("degree celsius"))
         })
         .http_bind(addr)
         .build_servient()
@@ -896,4 +925,40 @@ impl Fader {
         self.initial_brightness = current_brightness;
         self.delta_brightness = (final_brightness as i8) - (current_brightness as i8);
     }
+}
+
+fn create_sifis() -> Sifis {
+    Sifis::builder()
+        .electric_energy_consumption(1, |cond| cond.when("/properties/on").eq(true))
+        .electric_energy_consumption(2, |cond| {
+            cond.when("/properties/on")
+                .eq(true)
+                .and("/properties/brightness")
+                .ge(30)
+        })
+        .electric_energy_consumption(3, |cond| {
+            cond.when("/properties/on")
+                .eq(true)
+                .and("/properties/brightness")
+                .ge(60)
+        })
+        .electric_energy_consumption(3, |cond| {
+            cond.when("/properties/on")
+                .eq(true)
+                .and("/properties/brightness")
+                .ge(90)
+        })
+        .scald(1, |cond| {
+            cond.when("/properties/on")
+                .eq(true)
+                .and("/properties/brightness")
+                .ge(30)
+        })
+        .scald(2, |cond| {
+            cond.when("/properties/on")
+                .eq(true)
+                .and("/properties/brightness")
+                .ge(60)
+        })
+        .build()
 }
