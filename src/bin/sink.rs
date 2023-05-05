@@ -3,6 +3,7 @@ use demo_things::{CliCommon, ThingBuilderExt};
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
+use sifis_td::Sifis;
 use std::{convert::Infallible, future::ready, ops::Not, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -75,6 +76,7 @@ async fn main() {
 
     let addr = cli.common.socket_addr();
     let mut servient = Servient::builder("My Sink")
+        .ext(create_sifis())
         .finish_extend()
         .id("urn:dev:ops:my-sink-1234")
         .attype("OnOffSwitch")
@@ -82,25 +84,31 @@ async fn main() {
         .description("A web connected sink")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
         .form(|b| {
-            b.href("/properties")
+            b.ext(())
+                .href("/properties")
                 .http_get(properties)
                 .content_type("application/json")
                 .op(wot_td::thing::FormOperation::ReadAllProperties)
         })
         .form(|b| {
-            b.href("/events")
+            b.ext(())
+                .href("/events")
                 .http_get(all_events)
                 .op(wot_td::thing::FormOperation::SubscribeAllEvents)
                 .op(wot_td::thing::FormOperation::UnsubscribeAllEvents)
                 .subprotocol("sse")
         })
         .property("drain", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .attype("OnOffProperty")
                 .title("Drain Open/Close")
                 .description("Whether the drain is open (on) or closed (off)")
                 .form(|b| {
-                    b.href("/properties/drain")
+                    b.ext(())
+                        .href("/properties/drain")
                         .http_get(get_drain_property)
                         .http_put(put_drain_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
@@ -109,11 +117,15 @@ async fn main() {
                 .bool()
         })
         .property("flow", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .title("Flow")
                 .description("The percentage of flow from 0-100")
                 .form(|b| {
-                    b.href("/properties/flow")
+                    b.ext(())
+                        .href("/properties/flow")
                         .http_get(get_flow_property)
                         .http_put(put_flow_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
@@ -125,11 +137,15 @@ async fn main() {
                 .unit("percent")
         })
         .property("temperature", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .title("Temperature")
                 .description("The temperature expressed in Celsius degrees")
                 .form(|b| {
-                    b.href("/properties/temperature")
+                    b.ext(())
+                        .href("/properties/temperature")
                         .http_get(get_temperature_property)
                         .http_put(put_temperature_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
@@ -141,11 +157,15 @@ async fn main() {
                 .unit("C°")
         })
         .property("level", |b| {
-            b.finish_extend_data_schema()
+            b.ext(())
+                .ext_interaction(())
+                .ext_data_schema(())
+                .finish_extend_data_schema()
                 .title("Level")
                 .description("The level of the water expressed as percentage")
                 .form(|b| {
-                    b.href("/properties/level")
+                    b.ext(())
+                        .href("/properties/level")
                         .http_get(get_level_property)
                         .op(wot_td::thing::FormOperation::ReadProperty)
                 })
@@ -156,9 +176,12 @@ async fn main() {
                 .read_only()
         })
         .event("leak", |b| {
-            b.description("The sink is full and water is still flowing")
+            b.ext(())
+                .ext_interaction(())
+                .description("The sink is full and water is still flowing")
                 .form(|b| {
-                    b.href("/events/leak")
+                    b.ext(())
+                        .href("/events/leak")
                         .http_get(leak_events)
                         .op(wot_td::thing::FormOperation::SubscribeEvent)
                         .op(wot_td::thing::FormOperation::UnsubscribeEvent)
@@ -508,4 +531,41 @@ async fn put_temperature_property(
 async fn get_level_property(Extension(app): Extension<AppState>) -> Json<u8> {
     let level = app.get_level().await;
     Json(level)
+}
+
+fn create_sifis() -> Sifis {
+    Sifis::builder()
+        .water_flooding(1, |cond| {
+            cond.when("/properties/flow")
+                .gt(0)
+                .and("/properties/drain")
+                .eq(true)
+        })
+        .water_flooding(3, |cond| {
+            cond.when("/properties/flow")
+                .gt(0)
+                .and("/properties/drain")
+                .eq(false)
+        })
+        .water_flooding(5, |cond| {
+            cond.when("/properties/flow")
+                .ge(80)
+                .and("/properties/drain")
+                .eq(false)
+        })
+        .water_flooding(8, |cond| {
+            cond.when("/properties/flow")
+                .gt(0)
+                .and("/properties/drain")
+                .eq(false)
+                .and("/properties/level")
+                .ge(90)
+        })
+        .burn(3, |cond| {
+            cond.when("/properties/flow")
+                .gt(0)
+                .and("/properties/temperatature")
+                .ge(80)
+        })
+        .build()
 }
