@@ -1,0 +1,66 @@
+name: deploy
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'p*'
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+         - x86_64-unknown-linux-musl
+         - aarch64-unknown-linux-musl
+        include:
+         - target: x86_64-unknown-linux-musl
+           docker: amd64
+         - target: aarch64-unknown-linux-musl
+           docker: arm64v8
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        target: x86_64-unknown-linux-musl
+
+    - name: Install cross
+      env:
+        LINK: https://github.com/cross-rs/cross/releases/download
+        CROSS_VERSION: 0.2.5
+        CROSS_FILE: cross-x86_64-unknown-linux-musl
+      run: |
+        curl -L "$LINK/v$CROSS_VERSION/$CROSS_FILE.tar.gz" |
+        tar xz -C $HOME/.cargo/bin
+
+    - name: Build binaries
+      run: |
+        cross clean
+        cross build --target ${{ matrix.target }} --release
+        mv target/${{ matrix.target }}/release ${{ matrix.target }}
+
+    - name: Login to GitHub container registry (ghcr.io)
+      uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Prepare a dockerfile for the lamp
+      run: |
+        echo FROM ${{ matrix.docker }}/alpine > ${{ matrix.target }}/Dockerfile-lamp
+        echo ADD lamp / >> ${{ matrix.target }}/Dockerfile-lamp
+        echo ENTRYPOINT ["/lamp"] >> ${{ matrix.target }}/Dockerfile-lamp
+
+    - name: Assemble and push docker for ${{ matrix.target }}
+      uses: docker/build-push-action@v4
+      with:
+        push: true
+        tags: ghcr.io/sifis-home/demo-things-${{ matrix.target }}:latest
+        context: ${{ matrix.target }}
+        file: ${{ matrix.target }}/Dockerfile-lamp
