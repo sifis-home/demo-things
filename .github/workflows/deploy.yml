@@ -31,11 +31,6 @@ jobs:
         toolchain: stable
         target: x86_64-unknown-linux-musl
 
-    - name: Install musl
-      if: matrix.target == 'x86_64-unknown-linux-musl'
-      run: |
-        sudo apt-get install musl-tools
-
     - name: Install cross
       if: matrix.target != 'x86_64-unknown-linux-musl'
       env:
@@ -46,16 +41,11 @@ jobs:
         curl -L "$LINK/v$CROSS_VERSION/$CROSS_FILE.tar.gz" |
         tar xz -C $HOME/.cargo/bin
 
-    - name: Build binaries for non-native targets
-      if: matrix.target != 'x86_64-unknown-linux-musl'
+    - name: Build binaries
       run: |
         cross clean
         cross build --target ${{ matrix.target }} --release
         mv target/${{ matrix.target }}/release ${{ matrix.target }}
-
-    - name: Build binaries for the native targets
-      if: matrix.target == 'x86_64-unknown-linux-musl'
-      run: cargo install --path . --root ${{ matrix.target }}
 
     - name: Login to GitHub container registry (ghcr.io)
       uses: docker/login-action@v2
@@ -75,5 +65,5 @@ jobs:
       with:
         push: true
         tags: ghcr.io/sifis-home/demo-things-${{ matrix.target }}:latest
-        context: ${{ matrix.target }}/bin
+        context: ${{ matrix.target }}
         file: ${{ matrix.target }}/Dockerfile-lamp
