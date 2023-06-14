@@ -1,6 +1,8 @@
 name: deploy
 on:
   push:
+    branch:
+      - 'test-ci'
     tags:
       - 'v*.*.*'
       - 'p*'
@@ -48,7 +50,8 @@ jobs:
       if: matrix.target != 'x86_64-unknown-linux-musl'
       run: |
         cross clean
-        cross install --path . --target ${{ matrix.target }} --root ${{ matrix.target }}
+        cross build --target ${{ matrix.target }} --release
+        mv target/${{ matrix.target }}/release ${{ matrix.target }}
 
     - name: Build binaries for the native targets
       if: matrix.target == 'x86_64-unknown-linux-musl'
