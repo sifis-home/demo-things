@@ -120,7 +120,7 @@ async fn main() {
     };
 
     let addr = cli.common.socket_addr();
-    let thing_builder = Servient::builder("Ticking Door")
+    let thing_builder = Servient::builder(cli.common.title_or("Ticking Door"))
         .finish_extend()
         .id_from_cli(&cli.common)
         .attype("DoorSensor")

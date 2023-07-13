@@ -57,6 +57,10 @@ pub struct CliCommon {
     /// Set the Thing id
     #[arg(long)]
     pub id: Option<String>,
+
+    /// Set the Thing title
+    #[arg(long)]
+    pub title: Option<String>,
 }
 
 impl CliCommon {
@@ -106,6 +110,10 @@ impl CliCommon {
             Some(id) => thing_builder.id(id),
             None => thing_builder.id(uuid::Uuid::new_v4().urn().to_string()),
         }
+    }
+
+    pub fn title_or<'a>(&'a self, default_title: &'a str) -> &'a str {
+        self.title.as_deref().unwrap_or(default_title)
     }
 }
 

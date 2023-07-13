@@ -48,7 +48,7 @@ async fn main() {
     };
 
     let addr = cli.common.socket_addr();
-    let mut thing_builder = Servient::builder("On-Off Switch")
+    let mut thing_builder = Servient::builder(cli.common.title_or("On-Off Switch"))
         .finish_extend()
         .id_from_cli(&cli.common)
         .attype("OnOffSwitch");

@@ -67,7 +67,7 @@ async fn main() {
     };
 
     let addr = cli.socket_addr();
-    let mut servient = Servient::builder("My Lamp")
+    let mut servient = Servient::builder(cli.title_or("My Lamp"))
         .finish_extend()
         .id_from_cli(&cli)
         .attype("OnOffSwitch")

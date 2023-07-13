@@ -74,7 +74,7 @@ async fn main() {
     };
 
     let addr = cli.common.socket_addr();
-    let mut servient = Servient::builder("My Sink")
+    let mut servient = Servient::builder(cli.common.title_or("My Sink"))
         .finish_extend()
         .id_from_cli(&cli.common)
         .attype("OnOffSwitch")
