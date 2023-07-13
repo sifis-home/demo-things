@@ -131,7 +131,7 @@ async fn main() {
     let addr = cli.common.socket_addr();
     let thing_builder = Servient::builder("Ticking Sensor")
         .finish_extend()
-        .id("urn:dev:ops:ticking-sensor-1234")
+        .id_from_cli(&cli.common)
         .attype("TemperatureSensor")
         .attype("HumiditySensor");
     let mut servient = thing_builder

@@ -53,6 +53,10 @@ pub struct CliCommon {
     /// When provided, it is used to create the `base` field inside the WoT description.
     #[arg(long)]
     pub host: Option<String>,
+
+    /// Set the Thing id
+    #[arg(long)]
+    pub id: Option<String>,
 }
 
 impl CliCommon {
@@ -93,10 +97,21 @@ impl CliCommon {
             None => thing_builder,
         }
     }
+
+    pub fn set_thing_id<O: ExtendableThing, S>(
+        &self,
+        thing_builder: ThingBuilder<O, S>,
+    ) -> ThingBuilder<O, S> {
+        match &self.id {
+            Some(id) => thing_builder.id(id),
+            None => thing_builder.id(uuid::Uuid::new_v4().urn().to_string()),
+        }
+    }
 }
 
 pub trait ThingBuilderExt {
     fn base_from_cli(self, cli: &CliCommon) -> Self;
+    fn id_from_cli(self, cli: &CliCommon) -> Self;
 }
 
 impl<Other, Status> ThingBuilderExt for ThingBuilder<Other, Status>
@@ -106,6 +121,10 @@ where
     #[inline]
     fn base_from_cli(self, cli: &CliCommon) -> Self {
         cli.set_thing_base(self)
+    }
+    #[inline]
+    fn id_from_cli(self, cli: &CliCommon) -> Self {
+        cli.set_thing_id(self)
     }
 }
 

@@ -147,7 +147,7 @@ async fn main() {
     let addr = cli.common.socket_addr();
     let mut servient = Servient::builder("My Oven")
         .finish_extend()
-        .id("urn:dev:ops:my-oven-1234")
+        .id_from_cli(&cli.common)
         .attype("DoorSensor")
         .attype("Thermostat")
         .attype("OnOffSwitch")

@@ -50,7 +50,7 @@ async fn main() {
     let addr = cli.common.socket_addr();
     let mut thing_builder = Servient::builder("On-Off Switch")
         .finish_extend()
-        .id("urn:dev:ops:on-off-1234")
+        .id_from_cli(&cli.common)
         .attype("OnOffSwitch");
     if cli.light {
         thing_builder = thing_builder.attype("Light");

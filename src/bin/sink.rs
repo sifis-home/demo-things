@@ -76,7 +76,7 @@ async fn main() {
     let addr = cli.common.socket_addr();
     let mut servient = Servient::builder("My Sink")
         .finish_extend()
-        .id("urn:dev:ops:my-sink-1234")
+        .id_from_cli(&cli.common)
         .attype("OnOffSwitch")
         .base_from_cli(&cli.common)
         .description("A web connected sink")

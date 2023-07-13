@@ -122,7 +122,7 @@ async fn main() {
     let addr = cli.common.socket_addr();
     let thing_builder = Servient::builder("Ticking Door")
         .finish_extend()
-        .id("urn:dev:ops:ticking-door-1234")
+        .id_from_cli(&cli.common)
         .attype("DoorSensor")
         .attype("Lock");
     let mut servient = thing_builder

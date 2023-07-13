@@ -69,7 +69,7 @@ async fn main() {
     let addr = cli.socket_addr();
     let mut servient = Servient::builder("My Lamp")
         .finish_extend()
-        .id("urn:dev:ops:my-lamp-1234")
+        .id_from_cli(&cli)
         .attype("OnOffSwitch")
         .attype("Light")
         .base_from_cli(&cli)
