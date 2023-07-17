@@ -7,7 +7,6 @@
 - [x] Sink
 - [x] Ticking Door
 - [x] Ticking Sensor
-- [ ] Cooker
 - [x] Oven
 - [x] Fridge
 
