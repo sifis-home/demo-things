@@ -1,6 +1,6 @@
 use clap::Parser;
 use demo_things::{config_signal_loader, CliCommon, SimulationStream, ThingBuilderExt};
-use door::*;
+use door::{Door, LockStatus, SimulationStreamItem};
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
 use http_api_problem::HttpApiProblem;
@@ -233,12 +233,12 @@ impl AppState {
     }
 
     #[inline]
-    async fn lock(&self) -> Result<(), DoorError> {
+    async fn lock(&self) -> Result<(), door::Error> {
         self.use_oneshot(Message::Lock).await
     }
 
     #[inline]
-    async fn unlock(&self) -> Result<(), DoorError> {
+    async fn unlock(&self) -> Result<(), door::Error> {
         self.use_oneshot(Message::Unlock).await
     }
 }
@@ -247,8 +247,8 @@ impl AppState {
 enum Message {
     GetOpen(oneshot::Sender<bool>),
     GetLock(oneshot::Sender<LockStatus>),
-    Lock(oneshot::Sender<Result<(), DoorError>>),
-    Unlock(oneshot::Sender<Result<(), DoorError>>),
+    Lock(oneshot::Sender<Result<(), door::Error>>),
+    Unlock(oneshot::Sender<Result<(), door::Error>>),
 }
 
 async fn handle_messages(thing: Thing, receiver: mpsc::Receiver<Message>, cli: &Cli) {
@@ -286,7 +286,7 @@ async fn handle_messages(thing: Thing, receiver: mpsc::Receiver<Message>, cli: &
             };
 
             match event {
-                Event::Message(message) => handle_message(message, &mut status).await,
+                Event::Message(message) => handle_message(message, &mut status),
                 Event::Config(config) => {
                     info!("New config obtained. Resetting door statuses to new config.");
 
@@ -323,7 +323,7 @@ mod door {
 
     use demo_things::Simulation;
 
-    use super::*;
+    use super::{Deserialize, DoorSimulation, Duration, Serialize};
 
     #[derive(Debug, Default, Serialize, Deserialize)]
     pub struct Door {
@@ -346,20 +346,20 @@ mod door {
             self
         }
 
-        pub fn do_lock(&mut self) -> Result<&mut Self, DoorError> {
+        pub fn do_lock(&mut self) -> Result<&mut Self, Error> {
             if self.is_open {
-                Err(DoorError::OpenDoor)
+                Err(Error::OpenDoor)
             } else {
-                self.lock.lock().map_err(DoorError::Lock)?;
+                self.lock.lock().map_err(Error::Lock)?;
                 Ok(self)
             }
         }
 
-        pub fn do_unlock(&mut self) -> Result<&mut Self, DoorError> {
+        pub fn do_unlock(&mut self) -> Result<&mut Self, Error> {
             if self.is_open {
-                Err(DoorError::OpenDoor)
+                Err(Error::OpenDoor)
             } else {
-                self.lock.unlock().map_err(DoorError::Lock)?;
+                self.lock.unlock().map_err(Error::Lock)?;
                 Ok(self)
             }
         }
@@ -374,12 +374,12 @@ mod door {
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum DoorError {
+    pub enum Error {
         OpenDoor,
         Lock(LockError),
     }
 
-    impl fmt::Display for DoorError {
+    impl fmt::Display for Error {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 Self::OpenDoor => f.write_str("cannot lock or unlock an open door"),
@@ -494,8 +494,8 @@ mod door {
     }
 }
 
-async fn handle_message(message: Message, status: &mut Door) {
-    use Message::*;
+fn handle_message(message: Message, status: &mut Door) {
+    use Message::{GetLock, GetOpen, Lock, Unlock};
 
     match message {
         GetOpen(sender) => sender.send(status.is_open()).unwrap(),

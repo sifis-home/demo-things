@@ -68,9 +68,10 @@ impl CliCommon {
             .or_else(|_| EnvFilter::try_new(filter))
             .unwrap();
 
-        tracing_subscriber::fmt().with_env_filter(filter).init()
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
+    #[must_use]
     pub fn socket_addr(&self) -> SocketAddr {
         SocketAddr::from((self.bind_addr, self.listen_port))
     }
@@ -96,6 +97,7 @@ impl CliCommon {
 }
 
 pub trait ThingBuilderExt {
+    #[must_use]
     fn base_from_cli(self, cli: &CliCommon) -> Self;
 }
 
@@ -261,6 +263,8 @@ impl<T> ConfigSignalLoaderStreamInner<T> {
 }
 
 pin_project! {
+    // Reason: unsafety is completely handled by pin_project
+    #[allow(clippy::unsafe_derive_deserialize)]
     #[derive(
         Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
     )]
@@ -271,6 +275,8 @@ pin_project! {
 }
 
 pin_project! {
+    // Reason: unsafety is completely handled by pin_project
+    #[allow(clippy::unsafe_derive_deserialize)]
     #[derive(
         Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
     )]

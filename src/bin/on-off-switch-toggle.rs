@@ -158,12 +158,12 @@ async fn handle_messages(thing: Thing, mut receiver: mpsc::Receiver<Message>) {
     let Thing { mut is_on } = thing;
 
     while let Some(message) = receiver.recv().await {
-        handle_message(message, &mut is_on).await
+        handle_message(message, &mut is_on);
     }
 }
 
-async fn handle_message(message: Message, is_on: &mut bool) {
-    use Message::*;
+fn handle_message(message: Message, is_on: &mut bool) {
+    use Message::{GetIsOn, SetIsOn, Toggle};
 
     match message {
         GetIsOn(sender) => sender.send(*is_on).unwrap(),

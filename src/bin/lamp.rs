@@ -5,7 +5,13 @@ use http_api_problem::HttpApiProblem;
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 use sifis_td::Sifis;
-use std::{collections::HashMap, future::ready, ops::Not, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    future::{self, ready},
+    ops::Not,
+    sync::Arc,
+    time::Duration,
+};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::{
     sync::{broadcast, mpsc, oneshot},
@@ -55,7 +61,7 @@ async fn main() {
     let lamp = Lamp {
         is_on: true,
         brightness: 50,
-        actions: Default::default(),
+        actions: Vec::default(),
         temperature: 25,
     };
 
@@ -345,7 +351,7 @@ enum Message {
     CompleteAction(Uuid),
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum Event {
     Overheated {
@@ -400,8 +406,7 @@ async fn handle_messages(
                     &mut fader,
                     &message_sender,
                     &event_sender,
-                )
-                .await
+                );
             }
             Event::Tick => handle_tick(
                 is_on,
@@ -443,7 +448,7 @@ fn handle_tick(
     }
 }
 
-async fn handle_message(
+fn handle_message(
     message: Message,
     is_on: &mut bool,
     brightness: &mut u8,
@@ -452,7 +457,10 @@ async fn handle_message(
     message_sender: &mpsc::Sender<Message>,
     event_sender: &broadcast::Sender<Event>,
 ) {
-    use Message::*;
+    use Message::{
+        CompleteAction, DeleteAction, Fade, GetActions, GetBrightness, GetIsOn, GetProperties,
+        SetBrightness, SetIsOn,
+    };
 
     match message {
         GetProperties(sender) => {
@@ -480,11 +488,7 @@ async fn handle_message(
                 ActionName::Fade => StoredAction::to_fade,
             };
 
-            let index = actions.iter().position(|action| {
-                filter(action)
-                    .map(|action| action.id == id)
-                    .unwrap_or(false)
-            });
+            let index = actions.iter().position(|action| filter(action).id == id);
 
             let removed = match index {
                 Some(index) => {
@@ -493,7 +497,7 @@ async fn handle_message(
                 }
                 None => false,
             };
-            sender.send(removed).unwrap()
+            sender.send(removed).unwrap();
         }
         Fade {
             brightness: fade_brightness,
@@ -506,7 +510,7 @@ async fn handle_message(
             let real_duration = duration
                 .saturating_sub((now - time_requested).try_into().unwrap_or(Duration::ZERO));
             let id = Uuid::new_v4();
-            let href = format!("/actions/fade/{}", id);
+            let href = format!("/actions/fade/{id}");
             let fade_action = ActionStatus {
                 output: Some(FadeActionInput {
                     brightness: fade_brightness,
@@ -558,15 +562,12 @@ async fn handle_message(
         }
         CompleteAction(id) => {
             let actions = Arc::make_mut(actions);
-            let action = match actions.iter_mut().find(|action| action.id == id) {
-                Some(action) => action,
-                None => {
-                    tracing::warn!("unable to complete action with id {id}");
-                    return;
-                }
+            let Some(action) = actions.iter_mut().find(|action| action.id == id) else {
+                tracing::warn!("unable to complete action with id {id}");
+                return;
             };
 
-            let action = action.ty.to_fade_mut().unwrap();
+            let action = action.ty.to_fade_mut();
             let now = OffsetDateTime::now_utc();
             action.time_ended = Some(now);
             action.status = ActionStatusStatus::Completed;
@@ -622,22 +623,22 @@ fn handle_overheated_event(event: Event) -> Result<Option<sse::Event>, serde_jso
             }
             Ok(Some(event))
         }
-        _ => Ok(None),
+        Event::Brightness { .. } => Ok(None),
     }
 }
 
 #[inline]
-async fn all_events(
+fn all_events(
     extension: Extension<AppState>,
-) -> Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>> {
-    handle_sse_stream(extension, handle_overheated_event)
+) -> future::Ready<Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>>> {
+    future::ready(handle_sse_stream(extension, handle_overheated_event))
 }
 
 #[inline]
-async fn overheated_events(
+fn overheated_events(
     extension: Extension<AppState>,
-) -> Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>> {
-    handle_sse_stream(extension, handle_overheated_event)
+) -> future::Ready<Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>>> {
+    future::ready(handle_sse_stream(extension, handle_overheated_event))
 }
 
 async fn get_actions(Extension(state): Extension<AppState>) -> impl IntoResponse {
@@ -669,9 +670,9 @@ struct StoredAction {
 }
 
 impl StoredAction {
-    fn to_fade(&self) -> Option<&Self> {
+    fn to_fade(&self) -> &Self {
         match &self.ty {
-            StoredActionType::Fade(_) => Some(self),
+            StoredActionType::Fade(_) => self,
         }
     }
 }
@@ -693,9 +694,9 @@ enum StoredActionType {
 }
 
 impl StoredActionType {
-    fn to_fade_mut(&mut self) -> Option<&mut ActionStatus<FadeActionInput>> {
+    fn to_fade_mut(&mut self) -> &mut ActionStatus<FadeActionInput> {
         match self {
-            Self::Fade(fade) => Some(fade),
+            Self::Fade(fade) => fade,
         }
     }
 
@@ -705,9 +706,9 @@ impl StoredActionType {
         }
     }
 
-    fn into_output_href(self) -> Option<(Option<FadeActionInput>, Option<String>)> {
+    fn into_output_href(self) -> (Option<FadeActionInput>, Option<String>) {
         match self {
-            Self::Fade(ActionStatus { output, href, .. }) => Some((output, href)),
+            Self::Fade(ActionStatus { output, href, .. }) => (output, href),
         }
     }
 }
@@ -774,22 +775,22 @@ fn handle_brightness_stream(event: Event) -> Result<Option<sse::Event>, serde_js
             }
             Ok(Some(event))
         }
-        _ => Ok(None),
+        Event::Overheated { .. } => Ok(None),
     }
 }
 
 #[inline]
-async fn observe_brightness(
+fn observe_brightness(
     extension: Extension<AppState>,
-) -> Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>> {
-    handle_sse_stream(extension, handle_brightness_stream)
+) -> future::Ready<Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>>> {
+    future::ready(handle_sse_stream(extension, handle_brightness_stream))
 }
 
 #[inline]
-async fn observe_properties(
+fn observe_properties(
     extension: Extension<AppState>,
-) -> Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>> {
-    handle_sse_stream(extension, handle_brightness_stream)
+) -> future::Ready<Sse<impl Stream<Item = Result<sse::Event, serde_json::Error>>>> {
+    future::ready(handle_sse_stream(extension, handle_brightness_stream))
 }
 
 async fn get_fade_action(
@@ -799,7 +800,7 @@ async fn get_fade_action(
     let actions = app.get_actions().await;
     match actions
         .iter()
-        .filter_map(StoredAction::to_fade)
+        .map(StoredAction::to_fade)
         .find(|action| action.id == id)
     {
         Some(action) => {
@@ -847,7 +848,7 @@ async fn post_fade_action(
     Json(input): Json<FadeActionInput>,
 ) -> impl IntoResponse {
     let action = state.fade(input).await;
-    let (output, href) = action.ty.into_output_href().unwrap();
+    let (output, href) = action.ty.into_output_href();
 
     let response = ActionStatus {
         status: ActionStatusStatus::Pending,
@@ -868,9 +869,10 @@ async fn delete_fade_action(
     Path(id): Path<Uuid>,
     Extension(state): Extension<AppState>,
 ) -> impl IntoResponse {
-    match state.delete_action(ActionName::Fade, id).await {
-        true => StatusCode::NO_CONTENT,
-        false => StatusCode::NOT_FOUND,
+    if state.delete_action(ActionName::Fade, id).await {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
     }
 }
 

@@ -385,8 +385,7 @@ async fn handle_messages(oven: Oven, receiver: mpsc::Receiver<Message>, cli: &Cl
                         status.temperature,
                         &mut status.target_temperature,
                         &mut status.on,
-                    )
-                    .await
+                    );
                 }
                 Event::Tick => handle_tick(
                     status.open,
@@ -493,14 +492,17 @@ fn handle_tick(
     *temperature = final_temperature;
 }
 
-async fn handle_message(
+fn handle_message(
     message: Message,
     door_is_open: &mut bool,
     temperature: f32,
     target_temperature: &mut u8,
     is_on: &mut bool,
 ) {
-    use Message::*;
+    use Message::{
+        GetIsOn, GetOpen, GetProperties, GetTargetTemperature, GetTemperature, SetIsOn,
+        SetTargetTemperature,
+    };
 
     match message {
         GetProperties(sender) => {

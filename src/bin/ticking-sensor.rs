@@ -53,7 +53,7 @@ struct SensorConfig {
     variations: Vec<SensorVariation>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 struct SensorVariation {
     #[serde(with = "humantime_serde")]
     duration: Duration,
@@ -271,7 +271,7 @@ async fn handle_messages(thing: Thing, receiver: mpsc::Receiver<Message>, cli: &
 
             match event {
                 Event::Message(message) => {
-                    handle_message(message, temperature.current, humidity.current).await
+                    handle_message(message, temperature.current, humidity.current);
                 }
                 Event::Tick => {
                     let temperature_ticked = temperature.tick();
@@ -327,7 +327,7 @@ impl SensorStatus {
                         self.interpolation = self
                             .variations
                             .next()
-                            .map(|variation| interpolation_from_variation(self.current, variation))
+                            .map(|variation| interpolation_from_variation(self.current, variation));
                     }
                 },
                 None => break false,
@@ -397,8 +397,8 @@ impl Interpolation {
     }
 }
 
-async fn handle_message(message: Message, temperature: f32, humidity: f32) {
-    use Message::*;
+fn handle_message(message: Message, temperature: f32, humidity: f32) {
+    use Message::{GetHumidity, GetTemperature};
 
     match message {
         GetTemperature(sender) => {
