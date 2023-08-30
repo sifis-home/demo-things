@@ -348,11 +348,10 @@ async fn handle_messages(fridge: Fridge, receiver: mpsc::Receiver<Message>, cli:
                 Event::Message(message) => {
                     handle_message(
                         message,
-                        &mut status.open,
+                        status.open,
                         status.temperature,
                         &mut status.target_temperature,
-                    )
-                    .await
+                    );
                 }
                 Event::Tick => handle_tick(
                     status.open,
@@ -453,25 +452,27 @@ fn handle_tick(
     *temperature += temp_delta;
 }
 
-async fn handle_message(
+fn handle_message(
     message: Message,
-    door_is_open: &mut bool,
+    door_is_open: bool,
     temperature: f32,
     target_temperature: &mut i8,
 ) {
-    use Message::*;
+    use Message::{
+        GetOpen, GetProperties, GetTargetTemperature, GetTemperature, SetTargetTemperature,
+    };
 
     match message {
         GetProperties(sender) => {
             let properties = Properties {
-                open: *door_is_open,
+                open: door_is_open,
                 temperature: temperature as i8,
                 target_temperature: *target_temperature,
             };
             sender.send(properties).unwrap();
         }
         GetTargetTemperature(sender) => sender.send(*target_temperature).unwrap(),
-        GetOpen(sender) => sender.send(*door_is_open).unwrap(),
+        GetOpen(sender) => sender.send(door_is_open).unwrap(),
         SetTargetTemperature(value) => {
             *target_temperature = value;
         }

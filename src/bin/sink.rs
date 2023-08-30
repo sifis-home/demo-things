@@ -4,7 +4,12 @@ use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use sifis_td::Sifis;
-use std::{convert::Infallible, future::ready, ops::Not, time::Duration};
+use std::{
+    convert::Infallible,
+    future::{self, ready},
+    ops::Not,
+    time::Duration,
+};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_stream::{
@@ -293,7 +298,7 @@ enum Message {
     SetTemperature(u8),
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum Event {
     Leak {
@@ -338,8 +343,7 @@ async fn handle_messages(
                     &mut flow,
                     &mut temperature,
                     level,
-                )
-                .await
+                );
             }
             Event::Tick => handle_tick(
                 is_draining,
@@ -378,14 +382,17 @@ fn handle_tick(
     };
 }
 
-async fn handle_message(
+fn handle_message(
     message: Message,
     is_draining: &mut bool,
     flow: &mut u8,
     temperature: &mut u8,
     level: f32,
 ) {
-    use Message::*;
+    use Message::{
+        GetDrain, GetFlow, GetLevel, GetProperties, GetTemperature, SetDrain, SetFlow,
+        SetTemperature,
+    };
 
     match message {
         GetProperties(sender) => {
@@ -463,17 +470,17 @@ fn handle_leak_event(event: Event) -> sse::Event {
 }
 
 #[inline]
-async fn all_events(
+fn all_events(
     extension: Extension<AppState>,
-) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>> {
-    handle_sse_stream(extension, handle_leak_event)
+) -> future::Ready<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
+    future::ready(handle_sse_stream(extension, handle_leak_event))
 }
 
 #[inline]
-async fn leak_events(
+fn leak_events(
     extension: Extension<AppState>,
-) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>> {
-    handle_sse_stream(extension, handle_leak_event)
+) -> future::Ready<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
+    future::ready(handle_sse_stream(extension, handle_leak_event))
 }
 
 #[derive(Debug, Deserialize)]

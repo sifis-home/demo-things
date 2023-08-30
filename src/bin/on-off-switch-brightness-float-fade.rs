@@ -56,7 +56,7 @@ async fn main() {
     let thing = Thing {
         is_on: true,
         brightness: 50.,
-        actions: Default::default(),
+        actions: Vec::default(),
     };
 
     let (message_sender, message_receiver) = mpsc::channel(MESSAGE_QUEUE_LENGTH);
@@ -176,15 +176,15 @@ enum StoredActionType {
 }
 
 impl StoredActionType {
-    fn to_fade_mut(&mut self) -> Option<&mut ActionStatus<FadeActionInput>> {
+    fn to_fade_mut(&mut self) -> &mut ActionStatus<FadeActionInput> {
         match self {
-            Self::Fade(fade) => Some(fade),
+            Self::Fade(fade) => fade,
         }
     }
 
-    fn into_output_href(self) -> Option<(Option<FadeActionInput>, Option<String>)> {
+    fn into_output_href(self) -> (Option<FadeActionInput>, Option<String>) {
         match self {
-            Self::Fade(ActionStatus { output, href, .. }) => Some((output, href)),
+            Self::Fade(ActionStatus { output, href, .. }) => (output, href),
         }
     }
 }
@@ -321,8 +321,7 @@ async fn handle_messages(
                     &mut actions,
                     &mut fader,
                     &message_sender,
-                )
-                .await
+                );
             }
             Event::Tick => fader.tick(&mut brightness),
             Event::Stop => break,
@@ -330,7 +329,7 @@ async fn handle_messages(
     }
 }
 
-async fn handle_message(
+fn handle_message(
     message: Message,
     is_on: &mut bool,
     brightness: &mut f64,
@@ -338,7 +337,7 @@ async fn handle_message(
     fader: &mut Fader,
     message_sender: &mpsc::Sender<Message>,
 ) {
-    use Message::*;
+    use Message::{CompleteAction, Fade, GetBrightness, GetIsOn, SetBrightness, SetIsOn};
 
     match message {
         GetIsOn(sender) => sender.send(*is_on).unwrap(),
@@ -356,7 +355,7 @@ async fn handle_message(
             let real_duration = duration
                 .saturating_sub((now - time_requested).try_into().unwrap_or(Duration::ZERO));
             let id = Uuid::new_v4();
-            let href = format!("/actions/fade/{}", id);
+            let href = format!("/actions/fade/{id}");
             let fade_action = ActionStatus {
                 output: Some(FadeActionInput {
                     level: fade_level,
@@ -399,15 +398,12 @@ async fn handle_message(
         }
         CompleteAction(id) => {
             let actions = Arc::make_mut(actions);
-            let action = match actions.iter_mut().find(|action| action.id == id) {
-                Some(action) => action,
-                None => {
-                    tracing::warn!("unable to complete action with id {id}");
-                    return;
-                }
+            let Some(action) = actions.iter_mut().find(|action| action.id == id) else {
+                tracing::warn!("unable to complete action with id {id}");
+                return;
             };
 
-            let action = action.ty.to_fade_mut().unwrap();
+            let action = action.ty.to_fade_mut();
             let now = OffsetDateTime::now_utc();
             action.time_ended = Some(now);
             action.status = ActionStatusStatus::Completed;
@@ -471,7 +467,7 @@ async fn post_fade_action(
     Json(input): Json<FadeActionInput>,
 ) -> impl IntoResponse {
     let action = state.fade(input).await;
-    let (output, href) = action.ty.into_output_href().unwrap();
+    let (output, href) = action.ty.into_output_href();
 
     let response = ActionStatus {
         status: ActionStatusStatus::Pending,
@@ -507,6 +503,7 @@ impl Fader {
             self.delta_brightness / f64::from(self.ticks) * f64::from(self.tick + 1);
         let new_brightness = (self.initial_brightness + current_delta).clamp(0., 100.);
 
+        #[allow(clippy::float_cmp)]
         if *brightness != new_brightness {
             *brightness = new_brightness;
         }
