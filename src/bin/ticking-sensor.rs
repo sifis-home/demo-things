@@ -2,6 +2,7 @@ use clap::Parser;
 use demo_things::{config_signal_loader, CliCommon, OptionStream, ThingBuilderExt};
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::SIGHUP;
 use std::{future, ops::Not, path::PathBuf, time::Duration, vec};
@@ -34,20 +35,20 @@ struct Cli {
     common: CliCommon,
 
     /// The config TOML file for the ticking sensor.
-    config: PathBuf,
+    config: Option<PathBuf>,
 
     /// Dump a default configuration to the specified file and exit.
-    #[clap(short, long)]
+    #[clap(short, long, requires = "config")]
     dump: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct Config {
     humidity: SensorConfig,
     temperature: SensorConfig,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct SensorConfig {
     initial: f32,
     variations: Vec<SensorVariation>,
@@ -60,61 +61,68 @@ struct SensorVariation {
     variation: f32,
 }
 
+static DEFAULT_CONFIG: Lazy<Config> = Lazy::new(|| Config {
+    humidity: SensorConfig {
+        initial: 60.,
+        variations: vec![
+            SensorVariation {
+                duration: Duration::from_secs(10),
+                variation: 0.1,
+            },
+            SensorVariation {
+                duration: Duration::from_secs(7),
+                variation: -0.2,
+            },
+            SensorVariation {
+                duration: Duration::from_secs(5),
+                variation: 0.3,
+            },
+        ],
+    },
+    temperature: SensorConfig {
+        initial: 20.,
+        variations: vec![
+            SensorVariation {
+                duration: Duration::from_secs(10),
+                variation: -0.3,
+            },
+            SensorVariation {
+                duration: Duration::from_secs(4),
+                variation: 0.8,
+            },
+            SensorVariation {
+                duration: Duration::from_secs(5),
+                variation: -0.2,
+            },
+        ],
+    },
+});
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
     cli.common.setup_tracing();
 
     if cli.dump {
-        let config = Config {
-            humidity: SensorConfig {
-                initial: 60.,
-                variations: vec![
-                    SensorVariation {
-                        duration: Duration::from_secs(10),
-                        variation: 0.1,
-                    },
-                    SensorVariation {
-                        duration: Duration::from_secs(7),
-                        variation: -0.2,
-                    },
-                    SensorVariation {
-                        duration: Duration::from_secs(5),
-                        variation: 0.3,
-                    },
-                ],
-            },
-            temperature: SensorConfig {
-                initial: 20.,
-                variations: vec![
-                    SensorVariation {
-                        duration: Duration::from_secs(10),
-                        variation: -0.3,
-                    },
-                    SensorVariation {
-                        duration: Duration::from_secs(4),
-                        variation: 0.8,
-                    },
-                    SensorVariation {
-                        duration: Duration::from_secs(5),
-                        variation: -0.2,
-                    },
-                ],
-            },
-        };
-
-        let config = toml::to_vec(&config).unwrap();
-        std::fs::write(&cli.config, config).expect("unable to dump config to file");
+        let config = toml::to_vec(&*DEFAULT_CONFIG).unwrap();
+        let config_path = cli.config.as_ref().unwrap();
+        std::fs::write(config_path, config).expect("unable to dump config to file");
         println!(
             "Configuration successfully written to {}",
-            cli.config.display()
+            config_path.display(),
         );
         return;
     };
 
-    let config: Config = {
-        let config = std::fs::read(&cli.config).expect("unable to read config file");
-        toml::from_slice(&config).expect("unable to parse config file")
+    let config = match &cli.config {
+        Some(config_path) => {
+            let config = std::fs::read(config_path).expect("unable to read config file");
+            toml::from_slice(&config).expect("unable to parse config file")
+        }
+        None => {
+            warn!("Using default config, consider using the --dump parameter to create and use a config file.");
+            DEFAULT_CONFIG.clone()
+        }
     };
 
     let thing = Thing {
@@ -252,7 +260,7 @@ async fn handle_messages(thing: Thing, receiver: mpsc::Receiver<Message>, cli: &
         mut humidity,
     } = thing;
 
-    let mut csl = config_signal_loader([SIGHUP], &cli.config);
+    let mut csl = config_signal_loader([SIGHUP], cli.config.as_ref());
 
     let mut interval_stream = create_interval_stream();
     let mut receiver_stream = ReceiverStream::new(receiver)

@@ -1,4 +1,4 @@
-use std::{future, ops::Not, path::PathBuf, pin::pin, time::Duration, vec};
+use std::{borrow::Cow, future, ops::Not, path::PathBuf, pin::pin, time::Duration, vec};
 
 use axum::{
     http::StatusCode,
@@ -9,13 +9,14 @@ use clap::Parser;
 use demo_things::{config_signal_loader, CliCommon, Simulation, SimulationStream, ThingBuilderExt};
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sifis_td::Sifis;
 use signal_hook::consts::SIGHUP;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tower_http::cors::CorsLayer;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
     Servient,
@@ -27,7 +28,7 @@ use wot_td::builder::{
 
 const MESSAGE_QUEUE_LENGTH: usize = 16;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 struct OvenStatus {
     open: bool,
     on: bool,
@@ -35,7 +36,7 @@ struct OvenStatus {
     target_temperature: u8,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize)]
 struct OvenSimulation {
     #[serde(with = "humantime_serde")]
     wait: Duration,
@@ -43,14 +44,14 @@ struct OvenSimulation {
     open: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct OvenConfig {
     initial: OvenStatus,
     simulation: Vec<OvenSimulation>,
     deltas: Deltas,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 struct Deltas {
     increase: f32,
     door_open: f32,
@@ -72,12 +73,45 @@ pub struct Cli {
     common: CliCommon,
 
     /// Dump a default configuration to the specified file and exit.
-    #[clap(short, long)]
+    #[clap(short, long, requires = "config")]
     dump: bool,
 
     /// The config TOML file for the oven.
-    config: PathBuf,
+    config: Option<PathBuf>,
 }
+
+static DEFAULT_CONFIG: Lazy<OvenConfig> = Lazy::new(|| OvenConfig {
+    initial: OvenStatus {
+        open: false,
+        on: false,
+        temperature: 25.,
+        target_temperature: 220,
+    },
+    deltas: Deltas {
+        increase: 1.5,
+        door_open: 1.2,
+        door_close: 0.1,
+        target_range: 5.,
+    },
+    simulation: vec![
+        OvenSimulation {
+            wait: Duration::from_secs(3),
+            open: Some(true),
+        },
+        OvenSimulation {
+            wait: Duration::from_secs(8),
+            open: Some(false),
+        },
+        OvenSimulation {
+            wait: Duration::from_secs(15),
+            open: Some(true),
+        },
+        OvenSimulation {
+            wait: Duration::from_secs(3),
+            open: Some(false),
+        },
+    ],
+});
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -85,56 +119,30 @@ async fn main() {
     cli.common.setup_tracing();
 
     if cli.dump {
-        let config = OvenConfig {
-            initial: OvenStatus {
-                open: false,
-                on: false,
-                temperature: 25.,
-                target_temperature: 220,
-            },
-            deltas: Deltas {
-                increase: 1.5,
-                door_open: 1.2,
-                door_close: 0.1,
-                target_range: 5.,
-            },
-            simulation: vec![
-                OvenSimulation {
-                    wait: Duration::from_secs(3),
-                    open: Some(true),
-                },
-                OvenSimulation {
-                    wait: Duration::from_secs(8),
-                    open: Some(false),
-                },
-                OvenSimulation {
-                    wait: Duration::from_secs(15),
-                    open: Some(true),
-                },
-                OvenSimulation {
-                    wait: Duration::from_secs(3),
-                    open: Some(false),
-                },
-            ],
-        };
-
-        let config = toml::to_vec(&config).unwrap();
-        std::fs::write(&cli.config, config).expect("unable to dump config to file");
+        let config = toml::to_vec(&*DEFAULT_CONFIG).unwrap();
+        let config_path = cli.config.as_ref().unwrap();
+        std::fs::write(config_path, config).expect("unable to dump config to file");
         println!(
             "Configuration successfully written to {}",
-            cli.config.display()
+            config_path.display(),
         );
         return;
     };
 
-    let oven: OvenConfig = {
-        let config = std::fs::read(&cli.config).expect("unable to read config file");
-        toml::from_slice(&config).expect("unable to parse config file")
+    let oven = match &cli.config {
+        Some(config_path) => {
+            let config = std::fs::read(config_path).expect("unable to read config file");
+            Cow::Owned(toml::from_slice(&config).expect("unable to parse config file"))
+        }
+        None => {
+            warn!("Using default config, consider using the --dump parameter to create and use a config file.");
+            Cow::Borrowed(&*DEFAULT_CONFIG)
+        }
     };
 
     let oven = Oven {
         status: oven.initial,
-        simulation: oven.simulation.into_iter(),
+        simulation: oven.simulation.clone().into_iter(),
         deltas: oven.deltas,
         heating: false,
     };
@@ -354,7 +362,7 @@ async fn handle_messages(oven: Oven, receiver: mpsc::Receiver<Message>, cli: &Cl
         mut heating,
     } = oven;
 
-    let mut csl = config_signal_loader([SIGHUP], &cli.config);
+    let mut csl = config_signal_loader([SIGHUP], cli.config.as_ref());
     let mut simulation_stream = create_simulation_stream(simulation);
 
     let mut interval_stream = create_interval_stream();
