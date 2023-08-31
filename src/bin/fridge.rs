@@ -1,4 +1,4 @@
-use std::{future, ops::Not, path::PathBuf, pin::pin, time::Duration, vec};
+use std::{borrow::Cow, future, ops::Not, path::PathBuf, pin::pin, time::Duration, vec};
 
 use axum::{
     http::StatusCode,
@@ -9,13 +9,14 @@ use clap::Parser;
 use demo_things::{config_signal_loader, CliCommon, Simulation, SimulationStream, ThingBuilderExt};
 use futures_concurrency::{future::Join, stream::Merge};
 use futures_util::{stream, StreamExt};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sifis_td::Sifis;
 use signal_hook::consts::SIGHUP;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 use tower_http::cors::CorsLayer;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 use wot_serve::{
     servient::{BuildServient, HttpRouter, ServientSettings},
     Servient,
@@ -27,14 +28,14 @@ use wot_td::builder::{
 
 const MESSAGE_QUEUE_LENGTH: usize = 16;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 struct FridgeStatus {
     open: bool,
     temperature: f32,
     target_temperature: i8,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize)]
 struct FridgeSimulation {
     #[serde(with = "humantime_serde")]
     wait: Duration,
@@ -42,14 +43,14 @@ struct FridgeSimulation {
     open: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct FridgeConfig {
     initial: FridgeStatus,
     simulation: Vec<FridgeSimulation>,
     deltas: Deltas,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 struct Deltas {
     decrease: f32,
     door_open: f32,
@@ -71,12 +72,44 @@ pub struct Cli {
     common: CliCommon,
 
     /// Dump a default configuration to the specified file and exit.
-    #[clap(short, long)]
+    #[clap(short, long, requires = "config")]
     dump: bool,
 
     /// The config TOML file for the fridge.
-    config: PathBuf,
+    config: Option<PathBuf>,
 }
+
+static DEFAULT_CONFIG: Lazy<FridgeConfig> = Lazy::new(|| FridgeConfig {
+    initial: FridgeStatus {
+        open: false,
+        temperature: 8.0,
+        target_temperature: 4,
+    },
+    deltas: Deltas {
+        decrease: 0.35,
+        door_open: 0.3,
+        door_close: 0.01,
+        target_range: 3.5,
+    },
+    simulation: vec![
+        FridgeSimulation {
+            wait: Duration::from_secs(3),
+            open: Some(true),
+        },
+        FridgeSimulation {
+            wait: Duration::from_secs(8),
+            open: Some(false),
+        },
+        FridgeSimulation {
+            wait: Duration::from_secs(15),
+            open: Some(true),
+        },
+        FridgeSimulation {
+            wait: Duration::from_secs(3),
+            open: Some(false),
+        },
+    ],
+});
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -84,55 +117,30 @@ async fn main() {
     cli.common.setup_tracing();
 
     if cli.dump {
-        let config = FridgeConfig {
-            initial: FridgeStatus {
-                open: false,
-                temperature: 8.0,
-                target_temperature: 4,
-            },
-            deltas: Deltas {
-                decrease: 0.35,
-                door_open: 0.3,
-                door_close: 0.01,
-                target_range: 3.5,
-            },
-            simulation: vec![
-                FridgeSimulation {
-                    wait: Duration::from_secs(3),
-                    open: Some(true),
-                },
-                FridgeSimulation {
-                    wait: Duration::from_secs(8),
-                    open: Some(false),
-                },
-                FridgeSimulation {
-                    wait: Duration::from_secs(15),
-                    open: Some(true),
-                },
-                FridgeSimulation {
-                    wait: Duration::from_secs(3),
-                    open: Some(false),
-                },
-            ],
-        };
-
-        let config = toml::to_vec(&config).unwrap();
-        std::fs::write(&cli.config, config).expect("unable to dump config to file");
+        let config = toml::to_vec(&*DEFAULT_CONFIG).unwrap();
+        let config_path = cli.config.as_ref().unwrap();
+        std::fs::write(config_path, config).expect("unable to dump config to file");
         println!(
             "Configuration successfully written to {}",
-            cli.config.display()
+            config_path.display(),
         );
         return;
     };
 
-    let fridge: FridgeConfig = {
-        let config = std::fs::read(&cli.config).expect("unable to read config file");
-        toml::from_slice(&config).expect("unable to parse config file")
+    let fridge = match &cli.config {
+        Some(config_path) => {
+            let config = std::fs::read(config_path).expect("unable to read config file");
+            Cow::Owned(toml::from_slice(&config).expect("unable to parse config file"))
+        }
+        None => {
+            warn!("Using default config, consider using the --dump parameter to create and use a config file.");
+            Cow::Borrowed(&*DEFAULT_CONFIG)
+        }
     };
 
     let fridge = Fridge {
         status: fridge.initial,
-        simulation: fridge.simulation.into_iter(),
+        simulation: fridge.simulation.clone().into_iter(),
         deltas: fridge.deltas,
         cooling: false,
     };
@@ -321,7 +329,7 @@ async fn handle_messages(fridge: Fridge, receiver: mpsc::Receiver<Message>, cli:
         mut cooling,
     } = fridge;
 
-    let mut csl = config_signal_loader([SIGHUP], &cli.config);
+    let mut csl = config_signal_loader([SIGHUP], cli.config.as_ref());
     let mut simulation_stream = create_simulation_stream(simulation);
 
     let mut interval_stream = create_interval_stream();

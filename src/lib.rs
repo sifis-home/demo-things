@@ -12,7 +12,7 @@ use wot_td::{builder::ThingBuilder, extend::ExtendableThing};
 use std::{
     borrow::Borrow,
     ffi::c_int,
-    future::Future,
+    future::{self, Future},
     marker::PhantomData,
     mem,
     net::SocketAddr,
@@ -113,7 +113,7 @@ where
 
 pub fn config_signal_loader<I, S, T>(
     signals: I,
-    config_path: impl Into<PathBuf>,
+    config_path: Option<impl Into<PathBuf>>,
 ) -> ConfigSignalLoader<T>
 where
     I: IntoIterator<Item = S>,
@@ -121,7 +121,7 @@ where
 {
     let signals = Signals::new(signals).expect("unable to create signal handlers");
     let handle = signals.handle();
-    let config_path = config_path.into();
+    let config_path = config_path.map(Into::into);
     let stream = ConfigSignalLoaderStream {
         signals,
         inner: ConfigSignalLoaderStreamInner::None(ConfigSignalLoaderStreamInnerStatus {
@@ -165,7 +165,7 @@ type ConfigSignalLoaderStreamInnerFuture<T> =
     dyn Future<Output = (Option<T>, ConfigSignalLoaderStreamInnerStatus<T>)>;
 
 struct ConfigSignalLoaderStreamInnerStatus<T> {
-    config_path: PathBuf,
+    config_path: Option<PathBuf>,
     handle: signal_hook_tokio::Handle,
     _marker: PhantomData<fn() -> T>,
 }
@@ -191,7 +191,12 @@ where
                     let status = this.inner.take_none().unwrap();
 
                     let mut future = async move {
-                        let raw_config = match tokio::fs::read(&status.config_path).await {
+                        let config_path = match &status.config_path {
+                            Some(config_path) => config_path,
+                            None => future::pending().await,
+                        };
+
+                        let raw_config = match tokio::fs::read(config_path).await {
                             Ok(config) => config,
                             Err(err) => {
                                 error!("unable to read config file: {err}");
