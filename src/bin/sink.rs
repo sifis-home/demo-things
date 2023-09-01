@@ -80,6 +80,7 @@ async fn main() {
         .finish_extend()
         .id("urn:dev:ops:my-sink-1234")
         .attype("OnOffSwitch")
+        .attype("sifis:sink")
         .base_from_cli(&cli.common)
         .description("A web connected sink")
         .security(|b| b.no_sec().with_key("nosec_sc").required())

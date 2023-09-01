@@ -153,6 +153,7 @@ async fn main() {
         .attype("DoorSensor")
         .attype("Thermostat")
         .attype("OnOffSwitch")
+        .attype("sifis:oven")
         .base_from_cli(&cli.common)
         .description("A web connected oven")
         .security(|b| b.no_sec().with_key("nosec_sc").required())

@@ -150,6 +150,7 @@ async fn main() {
         .id("urn:dev:ops:my-fridge-1234")
         .attype("DoorSensor")
         .attype("Thermostat")
+        .attype("sifis:fridge")
         .base_from_cli(&cli.common)
         .description("A web connected fridge")
         .security(|b| b.no_sec().with_key("nosec_sc").required())
