@@ -74,6 +74,7 @@ async fn main() {
         .id("urn:dev:ops:my-lamp-1234")
         .attype("OnOffSwitch")
         .attype("Light")
+        .attype("sifis:lamp")
         .base_from_cli(&cli)
         .description("A web connected lamp")
         .security(|b| b.no_sec().with_key("nosec_sc").required())

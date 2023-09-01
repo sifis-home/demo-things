@@ -124,7 +124,8 @@ async fn main() {
         .finish_extend()
         .id("urn:dev:ops:ticking-door-1234")
         .attype("DoorSensor")
-        .attype("Lock");
+        .attype("Lock")
+        .attype("sifis:door");
     let mut servient = thing_builder
         .base_from_cli(&cli.common)
         .security(|b| b.no_sec().with_key("nosec_sc").required())
