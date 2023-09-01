@@ -54,8 +54,8 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         let Some(mut next_status) = this.next_status.as_mut().as_pin_mut() else {
-                return Poll::Ready(None);
-            };
+            return Poll::Ready(None);
+        };
 
         ready!(next_status.as_mut().project().sleep.poll(cx));
         let current_status = match this.simulations.next() {
